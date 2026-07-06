@@ -6,7 +6,7 @@ import torch.nn.functional as F
 import lightning as L
 
 from motion_jepa.configuration import Config
-from motion_jepa.metrics import metric_collapse
+from motion_jepa.metrics import measure_collapse
 from motion_jepa.utils import ema_linear_scheduler
 
 class MotionJEPA(L.LightningModule):
@@ -16,12 +16,10 @@ class MotionJEPA(L.LightningModule):
         self.save_hyperparameters(asdict(config))
         self.config = config
 
-        self.model = T.nn.Module()
+        self.model = T.nn.Linear(4, 4)
 
     # General step
-    def _step(self, batch, stage: str):
-
-        motion: T.Tensor = batch["motion"]
+    def _step(self, motion: T.Tensor, stage: str):
         B, T, D, C = motion.shape
 
         # TODO: Generate multiple masks for the batch
@@ -29,6 +27,10 @@ class MotionJEPA(L.LightningModule):
         # TODO: Log metrics
 
         # NOTE: WE SHOULD USE SmoothL1 and not MSE, is safer! Also used in the real code of I-JEPA
+        #loss = F.smooth_l1_loss(pred, target, beta=1.0)
+        #self.log(
+        #    f"{stage}/loss", loss, prog_bar=True, on_step=(stage == "train"), on_epoch=True, batch_size=B
+        #)
 
         pass
 
@@ -45,7 +47,7 @@ class MotionJEPA(L.LightningModule):
         #self.model.update_teacher(ema)
 
     def _log_collapse_metrics(self, z: T.Tensor, batch_size: int, prefix: str, stage: str):
-        metrics = metric_collapse(z)
+        metrics = measure_collapse(z)
         self.log_dict(
             {
                 f"{stage}/{prefix}_{name}" : value

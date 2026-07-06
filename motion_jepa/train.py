@@ -11,6 +11,7 @@ import argparse
 
 from motion_jepa.configuration import Config, load_config
 from motion_jepa.jepa import MotionJEPA
+from motion_jepa.loader import MotionDataset
 
 # Creates cli flags and parameters
 def cli(argv: Sequence[str] | None = None) -> argparse.Namespace:
@@ -50,8 +51,16 @@ def train(config: Config, output: Path):
         ),
     )
 
+    # Standard dataset configuration
+    dataset = MotionDataset(
+        root="data/processed/motion",
+        batch_size=config.batch_size,
+        clip_value=10.0,
+        normalize=True,
+    )
+
     model = MotionJEPA(config)
-    trainer.fit(model, datamodule=None)
+    trainer.fit(model, datamodule=dataset)
     pass
 
 def main(argv: Sequence[str] | None = None) -> int:
