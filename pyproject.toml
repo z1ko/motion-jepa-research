@@ -9,12 +9,14 @@ dependencies = [
     "lightning>=2.6.5",
     "matplotlib>=3.11.0",
     "polars>=1.42.1",
+    "pyyaml>=6.0.3",
     "tensorboard>=2.21.0",
     "torch>=2.12.1",
     "zarr>=3.2.1",
 ]
 
 [project.scripts]
+preprocess = "motion_jepa.preprocess:main"
 train = "motion_jepa.train:main"
 
 [build-system]

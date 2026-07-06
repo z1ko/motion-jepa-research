@@ -1,19 +1,6 @@
-
-# Split fractions
-splits:
-  train: 0.70
-  val:   0.15
-  test:  0.15
-
 # How to resample frames
 resampling:
-  target_hz: 60.0
-  column: time
-
-# How to split into windows
-windowing:
-  duration_s: 2.0
-  stride_s: 0.5
+  target_hz: 100.0
 
 # All metadata columns in order
 metadata:

@@ -1,0 +1,34 @@
+
+# All datasets used for training
+pretrain_train:
+  - ACCAD
+  - BMLrub
+  - Eyes_Japan_Dataset
+  - HUMAN4D
+  - MoSh
+  - SFU
+  - TCDHands
+  - WEIZMANN
+  - CMU
+  - DFaust
+  - GRAB
+  - MOYO_smplx_neutral
+  - TotalCapture
+  - BMLmovi
+  - CNRS
+  - EKUT
+  - HDM05
+  - KIT
+  - PosePrior
+  - SSM
+  - Transitions
+
+# All datasets used to validate training
+pretrain_validation:
+  - BMLhandball
+
+# All hold-out datasets used for final validation
+validation:
+  - SOMA
+  - HumanEva
+  - DanceDB

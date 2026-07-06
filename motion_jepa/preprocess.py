@@ -10,14 +10,13 @@ Layout of one CSV file (378 columns, all rows = one subject/trial):
 - action: per-frame label (metadata only)
 """
 
-from dataclasses import dataclass
 import glob
 from pathlib import Path
-import random
 from typing import Any
 
 import numpy as np
 import polars as pl
+import yaml
 
 from motion_jepa.dataset import MotionDatasetWriter, MotionZarrStore, RunningKinematicsStats, _path_of_normalization_stats, _path_of_samples_index, _path_of_windows_index, stable_suid
 from motion_jepa.types import MotionSample, NormalizationStats
@@ -237,6 +236,88 @@ def create_raw_motion_dataset(
 # SPLIT AND WINDOWS
 # ================================================================================================================
 
+_DATASET_CONFIG_SPLITS = {
+    "pretrain_train": "train",
+    "pretrain_validation": "val",
+    "validation": "eval",
+}
+
+
+def load_dataset_splits(path: Path | str) -> dict[str, str]:
+
+    path = Path(path)
+    with path.open() as f:
+        raw = yaml.safe_load(f) or {}
+
+    if not isinstance(raw, dict):
+        raise ValueError(f"Expected mapping in dataset config: {path}")
+
+    dataset_to_split: dict[str, str] = {}
+    for section, split in _DATASET_CONFIG_SPLITS.items():
+        datasets = raw.get(section, [])
+        if datasets is None:
+            datasets = []
+        if not isinstance(datasets, list):
+            raise ValueError(f"Expected list for {section!r} in {path}")
+
+        for dataset in datasets:
+            if not isinstance(dataset, str) or not dataset:
+                raise ValueError(f"Invalid dataset name in {section!r}: {dataset!r}")
+            if dataset in dataset_to_split:
+                raise ValueError(
+                    f"Dataset {dataset!r} appears in multiple split lists"
+                )
+            dataset_to_split[dataset] = split
+
+    if not dataset_to_split:
+        raise ValueError(f"No datasets configured in {path}")
+
+    return dataset_to_split
+
+
+def _assign_dataset_splits(
+    samples: pl.DataFrame,
+    dataset_to_split: dict[str, str],
+) -> pl.DataFrame:
+    
+    if "dataset" not in samples.columns:
+        raise ValueError(
+            "samples.parquet must contain a 'dataset' column "
+            "to assign dataset-level splits."
+        )
+
+    dataset_values = (
+        samples
+        .select("dataset")
+        .unique()
+        .drop_nulls()
+        .get_column("dataset")
+        .to_list()
+    )
+
+    configured_datasets = set(dataset_to_split)
+    processed_datasets = {str(dataset) for dataset in dataset_values}
+    missing = sorted(processed_datasets - configured_datasets)
+    if missing:
+        raise ValueError(
+            "Processed datasets missing from dataset split config: "
+            f"{missing}"
+        )
+
+    unused = sorted(configured_datasets - processed_datasets)
+    if unused:
+        print(
+            "Configured datasets with no processed samples: "
+            + ", ".join(unused)
+        )
+
+    return samples.with_columns(
+        pl.col("dataset")
+        .cast(pl.Utf8)
+        .replace(dataset_to_split)
+        .alias("split")
+    )
+
 def _make_windows_for_sample(
     *,
     suid: str,
@@ -264,65 +345,12 @@ def _make_windows_for_sample(
     return rows
 
 
-def _assign_subject_splits(
-    samples: pl.DataFrame,
-    *,
-    train_ratio: float = 0.8,
-    val_ratio: float = 0.2,
-    seed: int = 13,
-    subject_col: str = "subject",
-) -> dict[str, str]:
-    if subject_col not in samples.columns:
-        raise ValueError(
-            f"samples.parquet must contain a {subject_col!r} column "
-            "to prevent subject leakage."
-        )
-
-    total = train_ratio + val_ratio
-    if not np.isclose(total, 1.0):
-        raise ValueError(
-            f"Split ratios must sum to 1.0, got {total}"
-        )
-
-    subjects = (
-        samples
-        .select(subject_col)
-        .unique()
-        .drop_nulls()
-        .get_column(subject_col)
-        .to_list()
-    )
-
-    subjects = [str(s) for s in subjects]
-
-    rng = np.random.default_rng(seed)
-    rng.shuffle(subjects)
-
-    n_subjects = len(subjects)
-    n_train = int(round(train_ratio * n_subjects))
-    n_val = int(round(val_ratio * n_subjects))
-
-    train_subjects = subjects[:n_train]
-    val_subjects = subjects[n_train:n_train + n_val]
-
-    subject_to_split = {}
-
-    for subject in train_subjects:
-        subject_to_split[subject] = "train"
-
-    for subject in val_subjects:
-        subject_to_split[subject] = "val"
-
-    return subject_to_split
-
 def generate_splits_and_windows(
     *,
     root: Path | str,
+    datasets_config: Path | str = "config/datasets.yaml",
     window_length: int = 256,
     stride: int = 128,
-    train_frac: float = 0.8,
-    val_frac: float = 0.1,
-    seed: int = 13,
 ) -> None:
     root = Path(root)
 
@@ -331,27 +359,15 @@ def generate_splits_and_windows(
 
     samples = pl.read_parquet(samples_path)
 
-    required_cols = {"suid", "num_frames", "subject"}
+    required_cols = {"suid", "num_frames", "dataset"}
     missing = required_cols - set(samples.columns)
     if missing:
         raise ValueError(
             f"samples.parquet is missing required columns: {sorted(missing)}"
         )
-    
-    subject_to_split = _assign_subject_splits(
-        samples,
-        train_ratio=train_frac,
-        val_ratio=val_frac,
-        subject_col="subject",
-        seed=seed,
-    )
 
-    samples = samples.with_columns(
-        pl.col("subject")
-        .cast(pl.Utf8)
-        .replace(subject_to_split)
-        .alias("split")
-    )
+    dataset_to_split = load_dataset_splits(datasets_config)
+    samples = _assign_dataset_splits(samples, dataset_to_split)
 
     if samples["split"].null_count() > 0:
         bad = samples.filter(pl.col("split").is_null())
@@ -377,15 +393,14 @@ def generate_splits_and_windows(
     samples.write_parquet(samples_path)
     windows.write_parquet(windows_path)
 
-    print("Subject-level split complete")
+    print("Dataset-level split complete")
     print("----------------------------")
     print(
         samples
         .group_by("split")
         .agg([
             pl.len().alias("num_samples"),
-            pl.col("subject").n_unique().alias("num_subjects"),
-            pl.col("dataset").n_unique().alias("num_datasets")
+            pl.col("dataset").n_unique().alias("num_datasets"),
         ])
         .sort("split")
     )
@@ -474,22 +489,20 @@ def compute_and_store_normalization_stats(
 def main():
 
     # 1. Load all samples into the zarr dataset
-    # create_raw_motion_dataset(
-    #     raw_glob="../motion-jepa/data/raw/**/*.csv",
-    #     output_root="data/processed/motion",
-    #     hz=100.0,
-    #     chunk_length=256,
-    #     overwrite=True
-    # )
+    create_raw_motion_dataset(
+        raw_glob="../motion-jepa/data/raw/**/*.csv",
+        output_root="data/processed/motion",
+        chunk_length=256,
+        hz=100.0,
+        overwrite=True
+    )
     
-    # 2. Generate splits based on subjects
+    # 2. Generate splits based on whole datasets
     generate_splits_and_windows(
         root="data/processed/motion",
+        datasets_config="config/datasets.yaml",
         window_length=400, # 4s ~ 100hz
         stride=50, # 0.5 ~ 100hz
-        train_frac=0.9,
-        val_frac=0.1,
-        seed=42,
     )
 
     # 3. Generate normalization

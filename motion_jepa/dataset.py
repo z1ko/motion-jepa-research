@@ -2,15 +2,12 @@
 import hashlib
 from pathlib import Path
 import shutil
-from typing import Any
 
 import numpy as np
-import polars as pl
-import torch as T
 import zarr
 
-from motion_jepa.types import MotionSample, NormalizationStats
-from motion_jepa.utils import CHANNELS, JOINTS, signed_log1p_tau
+from motion_jepa.types import NormalizationStats
+from motion_jepa.utils import CHANNELS, JOINTS
 
 def _path_of_arrays(root: Path) -> Path:
     return root / "arrays.zarr"
