@@ -1,0 +1,25 @@
+[project]
+name = "motion-jepa-2"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "argparse>=1.4.0",
+    "lightning>=2.6.5",
+    "matplotlib>=3.11.0",
+    "polars>=1.42.1",
+    "tensorboard>=2.21.0",
+    "torch>=2.12.1",
+    "zarr>=3.2.1",
+]
+
+[project.scripts]
+train = "motion_jepa.train:main"
+
+[build-system]
+requires = ["setuptools>=80"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["motion_jepa*"]

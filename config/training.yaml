@@ -1,0 +1,11 @@
+
+batch_size: 100
+masks_per_sample: 4
+epochs: 100
+ema_momentum: 0.996
+learning_rate: 5e-4
+weight_decay: 0.05
+device: "auto"
+output_dir: "runs"
+num_workers: 0
+seed: 0
