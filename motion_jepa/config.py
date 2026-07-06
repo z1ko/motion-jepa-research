@@ -10,7 +10,7 @@ DEFAULT_CONFIG = {
         "window_size": 400,
     },
     "training": {
-        "batch_size": 200,
+        "batch_size": 100,
         "masks_per_sample": 4,
         "epochs": 100,
         "seed": 42,
@@ -29,24 +29,25 @@ DEFAULT_CONFIG = {
         }
     },
     "architecture": {
-        "embed_dim": 256,
+        "embed_dim": 128,
         "segment_size": 40,
         "channels": 4,
         "encoder": {
             "mlp_ratio": 4.0,
-            "dropout": 0.0,
+            "dropout": 0.2,
             "heads": 4,
-            "depth": 8,
+            "depth": 6,
         },
         "predictor": {
+            "inner_dim": 64,
             "mlp_ratio": 4.0,
-            "dropout": 0.0,
+            "dropout": 0.2,
             "heads": 4,
-            "depth": 8,
+            "depth": 3,
         },
     },
     "optim": {
-        "ema_steps": 30000,
+        "ema_steps": 20000,
         "ema_momentum": 0.996,
         "learning_rate": 5e-4,
         "weight_decay": 0.05

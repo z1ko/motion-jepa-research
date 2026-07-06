@@ -20,4 +20,5 @@ agent/
 
 # Generated folders
 statistics/
+runs/
 data/

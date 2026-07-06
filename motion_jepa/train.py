@@ -11,7 +11,7 @@ import lightning as L
 from motion_jepa.config import load_config
 
 from motion_jepa.loader import MotionDataset
-from motion_jepa.jepa import MotionJEPA
+from motion_jepa.jepa import MotionJEPAModule
 
 # Run training
 def train(config: DictConfig, output: Path):
@@ -24,8 +24,8 @@ def train(config: DictConfig, output: Path):
         default_root_dir=output,
         callbacks=[
             ModelCheckpoint(
-                filename="best-{epoch:04d}-{val_loss_epoch:.4f}",
-                monitor="val_loss_epoch",
+                filename="best-{epoch:04d}-{val_loss:.4f}",
+                monitor="val_loss",
                 mode="min",
                 save_top_k=1,
                 save_last=False,
@@ -52,7 +52,7 @@ def train(config: DictConfig, output: Path):
         normalize=True,
     )
 
-    model = MotionJEPA(config)
+    model = MotionJEPAModule(config)
     trainer.fit(model, datamodule=dataset)
     pass
 

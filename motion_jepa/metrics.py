@@ -45,7 +45,7 @@ def measure_collapse(z: T.Tensor, eps: float = 1e-12) -> dict[str, T.Tensor]:
     return {
         "std_mean": z_std.mean(),
         "std_min": z_std.min(),
-        "dims_below_1e-3": (z_std < 1e-3).sum(),
+        "dims_below_1e-3": (z_std < 1e-3).sum().float(),
         "cosine_concentration": cosine_concentration,
         "effective_rank": effective_rank,
         "effective_rank_ratio": effective_rank_ratio,

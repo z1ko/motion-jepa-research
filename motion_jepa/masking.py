@@ -9,22 +9,18 @@ class MaskIndices:
     context: t.Tensor
     targets: t.Tensor
 
-def mask_random(x: t.Tensor, *, targets_p: float = 0.6) -> MaskIndices:
+def mask_random(batch_size: int, segment_count: int, group_count: int, device: t.device, targets_p: float = 0.6) -> MaskIndices:
     """
-    x: [B, T, C, D]
-
     returns:
         context_indices: [B, n_context]
         targets_indices: [B, n_targets]
     """
 
-    B, T, G, C  = x.shape
-    numel = T * G
-
+    numel = segment_count * group_count
     n_targets = round(targets_p * numel)
-    scores = t.rand(B, numel, device=x.device)
-
+    scores = t.rand(batch_size, numel, device=device)
     permut = scores.argsort(dim=1)
+
     return MaskIndices(
         targets=permut[:, :n_targets],
         context=permut[:, n_targets:]

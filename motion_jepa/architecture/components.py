@@ -25,7 +25,7 @@ class TokenizeGroups(nn.Module):
             dictionary of groups, each one is a tensor of shape ..., G(i), C
         """
 
-        B, T, D, C = x.shape
+        *_, D, C = x.shape
 
         groups: dict[str, t.Tensor] = {}
         for i, group in enumerate(self.groups.keys()):
@@ -49,7 +49,7 @@ class TokenizeSegments(nn.Module):
         B, T, D, C = x.shape
         if T % self.segment_size != 0:
             raise ValueError(
-                f"Input tensor of shape {x.shape} is not compatible with segment_size={self.temporal_patch}"
+                f"Input tensor of shape {x.shape} is not compatible with segment_size={self.segment_size}"
             )
         
         segment_count = T // self.segment_size
@@ -67,8 +67,8 @@ class TokenEmbed(nn.Module):
         self.groups = config.training.groups
 
         # Tokenizers
-        self.tokenize_t = TokenizeSegments(self.segment_size)
-        self.tokenize_g = TokenizeGroups(self.groups)
+        self.tokenize_t = TokenizeSegments(config)
+        self.tokenize_g = TokenizeGroups(config)
 
         # Common embedding dimension projections
         self.projections = nn.ModuleDict({
@@ -77,15 +77,6 @@ class TokenEmbed(nn.Module):
                 self.embed_dim
             ) for group, indices in self.groups.items()
         })
-
-        # Temporal encoding
-        self.segment_count = self.window_size // self.segment_size
-        self.encode_t = nn.Parameter(t.zeros(1, self.segment_count, 1, self.embed_dim))
-        nn.init.trunc_normal_(self.encode_t, std=0.02)
-
-        # Group encoding
-        self.encode_g = nn.Parameter(t.zeros(1, 1, len(self.groups), self.embed_dim))
-        nn.init.trunc_normal_(self.encode_g,  std=0.02)
 
     def forward(self, x: t.Tensor) -> t.Tensor:
         
@@ -102,40 +93,7 @@ class TokenEmbed(nn.Module):
             x_group = self.projections[group](x_group) # B, S, E
             results.append(x_group)
 
-        x = t.stack(results, dim=2) # B, S, G, E
-
-        # Apply spatio-temporal encoding
-        x = x + self.encode_t + self.encode_g
-
-        return x
-
-class PositionalEncoding(nn.Module):
-    def __init__(self, segment_count: int, group_count: int, embed_dim: int):
-        super().__init__()
-
-        self.segment_count = segment_count
-        self.group_count = group_count
-        self.embed_dim = embed_dim
-
-        # Temporal encoding
-        self.encode_t = nn.Parameter(t.zeros(1, self.segment_count, 1, self.embed_dim))
-        nn.init.trunc_normal_(self.encode_t, std=0.02)
-
-        # Group encoding
-        self.encode_g = nn.Parameter(t.zeros(1, 1, self.group_count, self.embed_dim))
-        nn.init.trunc_normal_(self.encode_g,  std=0.02)
-
-    def forward(self, x: t.Tensor) -> t.Tensor:
-        return x + self.encode_t + self.encode_g
-    
-    def gather(self, indices: t.Tensor, batch_size: int) -> t.Tensor:
-        
-        encoding = self.encode_t + self.encode_g
-        encoding = encoding.reshape(1, self.segment_count * self.group_count, self.embed_dim)
-        encoding = encoding.expand(batch_size, -1, -1)
-        
-        gather_idx = indices.unsqueeze(-1).expand(-1, -1, self.embed_dim)
-        return encoding.gather(index=gather_idx, dim=1)
+        return t.stack(results, dim=2) # B, S, G, E
 
 # Standard transformer encoder
 def _encoder(d_model: int, depth: int, heads: int, mlp_ratio: float, dropout: float) -> nn.TransformerEncoder:
