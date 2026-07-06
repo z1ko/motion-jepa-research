@@ -21,70 +21,11 @@ import polars as pl
 
 from motion_jepa.dataset import MotionDatasetWriter, MotionZarrStore, RunningKinematicsStats, _path_of_normalization_stats, _path_of_samples_index, _path_of_windows_index, stable_suid
 from motion_jepa.types import MotionSample, NormalizationStats
+from motion_jepa.utils import _COLUMNS_EXTRA, _COLUMNS_KINEMATIC, _COLUMNS_METADATA, _GRAVITY_M_S2, _SCALE_SUFFIXES, CHANNELS, JOINTS, MIN_ORIGINAL_HZ, estimate_original_hz
 
 # ================================================================================================================
 # SCHEMA
 # ================================================================================================================
-
-CHANNELS: list[str] = ["pos", "vel", "acc", "tau"]
-JOINTS: list[str] = [
-    "pelvis_tilt", 
-    "pelvis_list", 
-    "pelvis_rotation",
-    "pelvis_tx", 
-    "pelvis_ty", 
-    "pelvis_tz",
-    "hip_flexion_r", 
-    "hip_adduction_r", 
-    "hip_rotation_r",
-    "knee_angle_r", 
-    "ankle_angle_r", 
-    "subtalar_angle_r", 
-    "mtp_angle_r",
-    "hip_flexion_l", 
-    "hip_adduction_l", 
-    "hip_rotation_l",
-    "knee_angle_l", 
-    "ankle_angle_l", 
-    "subtalar_angle_l", 
-    "mtp_angle_l",
-    "lumbar_bending", 
-    "lumbar_extension", 
-    "lumbar_twist",
-    "thorax_bending", 
-    "thorax_extension", 
-    "thorax_twist",
-    "head_bending", 
-    "head_extension", 
-    "head_twist",
-    "scapula_abduction_r", 
-    "scapula_elevation_r", 
-    "scapula_upward_rot_r",
-    "scapula_abduction_l", 
-    "scapula_elevation_l", 
-    "scapula_upward_rot_l",
-    "shoulder_r_x", 
-    "shoulder_r_y", 
-    "shoulder_r_z",
-    "shoulder_l_x", 
-    "shoulder_l_y", 
-    "shoulder_l_z",
-    "elbow_flexion_r", 
-    "elbow_flexion_l",
-    "pro_sup_r", 
-    "pro_sup_l",
-    "wrist_flexion_r", 
-    "wrist_deviation_r",
-    "wrist_flexion_l", 
-    "wrist_deviation_l",
-]
-
-_COLUMNS_KINEMATIC = [f"{joint}{suffix}" for joint in JOINTS for suffix in ("", "_vel", "_acc", "_tau")]
-_COLUMNS_EXTRA     = ["time", "action", "grf_total_x", "grf_total_y", "grf_total_z"]
-_COLUMNS_METADATA  = ["subject_mass_kg", "subject_height_m"]
-
-_SCALE_SUFFIXES = ("_scale_x", "_scale_y", "_scale_z")
-_GRAVITY_M_S2 = 9.80665
 
 # Overrides schema for known columns
 def _schema_overrides(columns: list[str]) -> dict[str, pl.DataType]:
@@ -254,16 +195,32 @@ def create_raw_motion_dataset(
     writer = MotionDatasetWriter(output_root, chunk_length=chunk_length)
     writer.prepare(overwrite=overwrite)
 
+    # How many files we skipped because of low hz
+    skipped_low_hz = 0
+    # How many files to stored
+    written = 0
+
     sample_rows: list[dict] = []
     for i, path in enumerate(files, start=1):
         suid = stable_suid(path)
         
         sample = load_sample_from_csv(Path(path))
+
+        original_hz = estimate_original_hz(sample.extra["time"].to_numpy())
+        if original_hz < MIN_ORIGINAL_HZ:
+            skipped_low_hz += 1
+            print(
+                f"Skipping low-Hz sample: "
+                f"original_hz={original_hz:.2f}, path={path}"
+            )
+            continue
+
         sample = resample_to_hz(sample, hz=60.0)
         sample = normalize_dynamics(sample)
 
         row = writer.write_sample(suid=suid, sample=sample)
         sample_rows.append(row)
+        written += 1
 
         if i % 100 == 0:
             print(f"[store] wrote {i}/{len(files)} samples")
@@ -272,76 +229,91 @@ def create_raw_motion_dataset(
     samples_df.write_parquet(_path_of_samples_index(output_root))
 
     print(f"Wrote dataset: {output_root}")
+    print(f"Skipped because of low hz: {skipped_low_hz}")
     print(f"Samples: {samples_df.height}")
 
 
-def assign_splits(
-    samples: pl.DataFrame,
-    *,
-    train_frac: float = 0.8,
-    val_frac: float = 0.2,
-    seed: int = 42
-) -> pl.DataFrame:
-    
-    rows = samples.to_dicts()
-    rng = random.Random(seed)
-    rng.shuffle(rows)
+# ================================================================================================================
+# SPLIT AND WINDOWS
+# ================================================================================================================
 
-    n = len(rows)
-    n_train = int(round(n * train_frac))
-    n_val = int(round(n * val_frac))
-
-    out = []
-    for i, row in enumerate(rows):
-        row = dict(row)
-
-        if i < n_train:
-            row["split"] = "train"
-        elif i < n_train + n_val:
-            row["split"] = "val"
-        else:
-            row["split"] = "test"
-
-        out.append(row)
-
-    return pl.DataFrame(out)
-
-def make_windows_for_sample(
+def _make_windows_for_sample(
     *,
     suid: str,
-    split: str,
     num_frames: int,
-    window_length: int,
+    split: str,
+    window_size: int,
     stride: int,
-    drop_last: bool = True,
-) -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
+) -> list[dict]:
+    rows = []
 
-    start = 0
-    while start < num_frames:
-        end = start + window_length
+    if num_frames < window_size:
+        return rows
 
-        if end > num_frames:
-            if drop_last:
-                break
-            start = max(0, num_frames - window_length)
-            end = num_frames
+    for start in range(0, num_frames - window_size + 1, stride):
+        end = start + window_size
 
-        rows.append(
-            {
-                "suid": suid,
-                "split": split,
-                "start": int(start),
-                "end": int(end),
-            }
-        )
-
-        start += stride
-
-        if not drop_last and end == num_frames:
-            break
+        rows.append({
+            "suid": suid,
+            "split": split,
+            "start": int(start),
+            "end": int(end),
+            "window_size": int(window_size),
+        })
 
     return rows
+
+
+def _assign_subject_splits(
+    samples: pl.DataFrame,
+    *,
+    train_ratio: float = 0.8,
+    val_ratio: float = 0.2,
+    seed: int = 13,
+    subject_col: str = "subject",
+) -> dict[str, str]:
+    if subject_col not in samples.columns:
+        raise ValueError(
+            f"samples.parquet must contain a {subject_col!r} column "
+            "to prevent subject leakage."
+        )
+
+    total = train_ratio + val_ratio
+    if not np.isclose(total, 1.0):
+        raise ValueError(
+            f"Split ratios must sum to 1.0, got {total}"
+        )
+
+    subjects = (
+        samples
+        .select(subject_col)
+        .unique()
+        .drop_nulls()
+        .get_column(subject_col)
+        .to_list()
+    )
+
+    subjects = [str(s) for s in subjects]
+
+    rng = np.random.default_rng(seed)
+    rng.shuffle(subjects)
+
+    n_subjects = len(subjects)
+    n_train = int(round(train_ratio * n_subjects))
+    n_val = int(round(val_ratio * n_subjects))
+
+    train_subjects = subjects[:n_train]
+    val_subjects = subjects[n_train:n_train + n_val]
+
+    subject_to_split = {}
+
+    for subject in train_subjects:
+        subject_to_split[subject] = "train"
+
+    for subject in val_subjects:
+        subject_to_split[subject] = "val"
+
+    return subject_to_split
 
 def generate_splits_and_windows(
     *,
@@ -351,40 +323,82 @@ def generate_splits_and_windows(
     train_frac: float = 0.8,
     val_frac: float = 0.1,
     seed: int = 13,
-    drop_last: bool = True,
 ) -> None:
     root = Path(root)
 
-    samples = pl.read_parquet(_path_of_samples_index(root))
-    samples = assign_splits(
+    samples_path = _path_of_samples_index(root)
+    windows_path = _path_of_windows_index(root)
+
+    samples = pl.read_parquet(samples_path)
+
+    required_cols = {"suid", "num_frames", "subject"}
+    missing = required_cols - set(samples.columns)
+    if missing:
+        raise ValueError(
+            f"samples.parquet is missing required columns: {sorted(missing)}"
+        )
+    
+    subject_to_split = _assign_subject_splits(
         samples,
-        train_frac=train_frac,
-        val_frac=val_frac,
+        train_ratio=train_frac,
+        val_ratio=val_frac,
+        subject_col="subject",
         seed=seed,
     )
 
-    samples.write_parquet(_path_of_samples_index(root))
+    samples = samples.with_columns(
+        pl.col("subject")
+        .cast(pl.Utf8)
+        .replace(subject_to_split)
+        .alias("split")
+    )
+
+    if samples["split"].null_count() > 0:
+        bad = samples.filter(pl.col("split").is_null())
+        raise ValueError(
+            f"Some samples could not be assigned to a split:\n{bad}"
+        )
 
     window_rows: list[dict[str, Any]] = []
-
     for row in samples.iter_rows(named=True):
         window_rows.extend(
-            make_windows_for_sample(
+            _make_windows_for_sample(
                 suid=str(row["suid"]),
-                split=str(row["split"]),
                 num_frames=int(row["num_frames"]),
-                window_length=window_length,
+                split=str(row["split"]),
+                window_size=window_length,
                 stride=stride,
-                drop_last=drop_last,
             )
         )
 
     windows = pl.DataFrame(window_rows)
-    windows.write_parquet(_path_of_windows_index(root))
 
-    print(f"Updated samples: {_path_of_samples_index(root)}")
-    print(f"Wrote windows: {_path_of_windows_index(root)}")
-    print(f"Windows: {windows.height}")
+    # Store updated parquets
+    samples.write_parquet(samples_path)
+    windows.write_parquet(windows_path)
+
+    print("Subject-level split complete")
+    print("----------------------------")
+    print(
+        samples
+        .group_by("split")
+        .agg([
+            pl.len().alias("num_samples"),
+            pl.col("subject").n_unique().alias("num_subjects"),
+            pl.col("dataset").n_unique().alias("num_datasets")
+        ])
+        .sort("split")
+    )
+
+    print()
+    print("Windows")
+    print("-------")
+    print(
+        windows
+        .group_by("split")
+        .len()
+        .sort("split")
+    )
 
 # ================================================================================================================
 # UTILITIES
@@ -460,21 +474,21 @@ def compute_and_store_normalization_stats(
 def main():
 
     # 1. Load all samples into the zarr dataset
-    create_raw_motion_dataset(
-        raw_glob="../motion-jepa/data/raw/**/*.csv",
-        output_root="data/processed/motion",
-        hz=60.0,
-        chunk_length=256,
-        overwrite=True
-    )
+    # create_raw_motion_dataset(
+    #     raw_glob="../motion-jepa/data/raw/**/*.csv",
+    #     output_root="data/processed/motion",
+    #     hz=100.0,
+    #     chunk_length=256,
+    #     overwrite=True
+    # )
     
-    # 2. Generate splits
+    # 2. Generate splits based on subjects
     generate_splits_and_windows(
         root="data/processed/motion",
-        window_length=240, # 4s ~ 60hz
-        stride=30, # 0.5s ~ 60hz
-        train_frac=0.8,
-        val_frac=0.2,
+        window_length=400, # 4s ~ 100hz
+        stride=50, # 0.5 ~ 100hz
+        train_frac=0.9,
+        val_frac=0.1,
         seed=42,
     )
 

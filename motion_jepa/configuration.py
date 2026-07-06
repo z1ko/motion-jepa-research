@@ -13,7 +13,7 @@ class Config:
     learning_rate: float = 5e-4
     weight_decay: float = 0.05
     device: str = "auto"
-    output_dir: Path = Path("runs/jepa-smoke")
+    output_dir: Path = Path("runs")
     num_workers: int = 0
     seed: int = 0
 

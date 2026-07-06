@@ -2,12 +2,15 @@
 import hashlib
 from pathlib import Path
 import shutil
+from typing import Any
 
 import numpy as np
 import polars as pl
+import torch as T
 import zarr
 
 from motion_jepa.types import MotionSample, NormalizationStats
+from motion_jepa.utils import CHANNELS, JOINTS, signed_log1p_tau
 
 def _path_of_arrays(root: Path) -> Path:
     return root / "arrays.zarr"
@@ -161,3 +164,22 @@ class RunningKinematicsStats:
             mean=mean.astype(np.float32),
             std=std.astype(np.float32),
         )
+    
+def load_normalization_stats(root: Path) -> tuple[np.ndarray, np.ndarray]:
+
+    path = _path_of_normalization_stats(root)
+    if not path.exists():
+        raise FileNotFoundError(f"Missing normalization stats: {path}")
+
+    data = np.load(path)
+    mean = data["mean"].astype(np.float32)
+    std = data["std"].astype(np.float32)
+
+    expected = (len(JOINTS), len(CHANNELS))
+    if mean.shape != expected:
+        raise ValueError(f"Expected mean shape {expected}, got {mean.shape}")
+    if std.shape != expected:
+        raise ValueError(f"Expected std shape {expected}, got {std.shape}")
+
+    return mean, std
+
