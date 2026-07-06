@@ -5,15 +5,15 @@ import torch as T
 import torch.nn.functional as F
 import lightning as L
 
-from motion_jepa.configuration import Config
+from motion_jepa.config import DictConfig
 from motion_jepa.metrics import measure_collapse
 from motion_jepa.utils import ema_linear_scheduler
 
 class MotionJEPA(L.LightningModule):
-    def __init__(self, config: Config):
+    def __init__(self, config: DictConfig):
         super().__init__()
 
-        self.save_hyperparameters(asdict(config))
+        self.save_hyperparameters(config)
         self.config = config
 
         self.model = T.nn.Linear(4, 4)
@@ -21,6 +21,7 @@ class MotionJEPA(L.LightningModule):
     # General step
     def _step(self, motion: T.Tensor, stage: str):
         B, T, D, C = motion.shape
+        print(motion.shape)
 
         # TODO: Generate multiple masks for the batch
         # TODO: Forward the batch to the model
@@ -42,7 +43,7 @@ class MotionJEPA(L.LightningModule):
 
     # EMA update of the teacher, with linear ema momentum update
     def on_before_zero_grad(self, optimizer):
-        ema = ema_linear_scheduler(self.trainer.max_steps, self.global_step, self.config.ema_momentum)
+        ema = ema_linear_scheduler(self.config.optim.ema_steps, self.global_step, self.config.optim.ema_momentum)
         self.log("ema_momentum", ema, prog_bar=False, on_step=False, on_epoch=True)
         #self.model.update_teacher(ema)
 
@@ -62,7 +63,7 @@ class MotionJEPA(L.LightningModule):
     def configure_optimizers(self):
         return T.optim.AdamW(
             (p for p in self.model.parameters() if p.requires_grad),
-            weight_decay = float(self.config.weight_decay),
-            lr = float(self.config.learning_rate),
+            weight_decay = self.config.optim.weight_decay,
+            lr = self.config.optim.learning_rate,
             betas=(0.9, 0.95),
         )

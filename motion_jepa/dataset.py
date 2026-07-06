@@ -135,11 +135,11 @@ class MotionZarrStore:
 
     def get_kinematics(self, suid: str) -> zarr.Array:
         path = f"{_path_of_sample_group(suid)}/kinematics"
-        return self.zroot[path]
+        return self.zroot[path] # type: ignore
 
     def get_kinematics_window(self, suid: str, start: int, end: int) -> np.ndarray:
         arr = self.get_kinematics(suid)[start:end, :, :]
-        return arr
+        return arr # type: ignore
 
 class RunningKinematicsStats:
     def __init__(self, shape: tuple[int, int]):

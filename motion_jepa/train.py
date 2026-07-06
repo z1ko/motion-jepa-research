@@ -2,33 +2,26 @@
 
 from lightning.pytorch.callbacks import ModelCheckpoint
 from lightning.pytorch.loggers import TensorBoardLogger
-from collections.abc import Sequence
+from omegaconf import DictConfig
 from pathlib import Path
 
 import torch as T
 import lightning as L
-import argparse
 
-from motion_jepa.configuration import Config, load_config
-from motion_jepa.jepa import MotionJEPA
+from motion_jepa.config import load_config
+
 from motion_jepa.loader import MotionDataset
-
-# Creates cli flags and parameters
-def cli(argv: Sequence[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Train model")
-    parser.add_argument("--config", type=Path, default=Path("config/training.yaml"))
-    parser.add_argument("--output", type=Path, default=None)
-    return parser.parse_args(argv)
+from motion_jepa.jepa import MotionJEPA
 
 # Run training
-def train(config: Config, output: Path):
+def train(config: DictConfig, output: Path):
     print(config)
 
-    L.seed_everything(config.seed, workers=True)
+    L.seed_everything(config.training.seed, workers=True)
     trainer = L.Trainer(
-        accelerator=config.device,
-        max_epochs=config.epochs,
-        default_root_dir=config.output_dir,
+        accelerator="auto",
+        max_epochs=config.training.epochs,
+        default_root_dir=output,
         callbacks=[
             ModelCheckpoint(
                 filename="best-{epoch:04d}-{val_loss_epoch:.4f}",
@@ -53,8 +46,8 @@ def train(config: Config, output: Path):
 
     # Standard dataset configuration
     dataset = MotionDataset(
-        root="data/processed/motion",
-        batch_size=config.batch_size,
+        root=config.data.root,
+        batch_size=config.training.batch_size,
         clip_value=10.0,
         normalize=True,
     )
@@ -63,11 +56,10 @@ def train(config: Config, output: Path):
     trainer.fit(model, datamodule=dataset)
     pass
 
-def main(argv: Sequence[str] | None = None) -> int:
-    args = cli(argv)
-    config = load_config(args.config)
-    train(config, args.output)
-    return 0
+
+def main():
+    cfg = load_config("config/experiment.yaml")
+    train(cfg, Path("runs"))
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    main()
