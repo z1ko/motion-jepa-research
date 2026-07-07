@@ -38,27 +38,42 @@ class MotionEncoder(nn.Module):
         )
         
 
-    def forward_full_and_gather(self, x: t.Tensor, idx: t.Tensor) -> t.Tensor:
-        x = self.forward(x, idx=None)
+    def forward_full_and_gather(
+        self,
+        x: t.Tensor,
+        idx: t.Tensor,
+        key_padding_mask: t.Tensor | None = None,
+    ) -> t.Tensor:
+        # Full (ungathered) mask: the teacher attends over every token
+        # (including any padding) before the caller gathers target rows,
+        # so padding must be excluded from attention here, not after.
+        x = self.forward(x, idx=None, key_padding_mask=key_padding_mask)
         return x.gather(
             index=idx.unsqueeze(-1).expand(-1, -1, x.shape[-1]),
             dim=1
         )
 
-    def forward(self, x: t.Tensor, idx: t.Tensor | None = None) -> t.Tensor:
-        
+    def forward(
+        self,
+        x: t.Tensor,
+        idx: t.Tensor | None = None,
+        key_padding_mask: t.Tensor | None = None,
+    ) -> t.Tensor:
+
         tokens = self.embed(x)
         tokens = tokens.flatten(1, 2) # B, SG, E
 
         if idx is not None:
             # Gather only tokens present in idx
             tokens = tokens.gather(
-                index=idx.unsqueeze(-1).expand(-1, -1, tokens.shape[-1]), 
+                index=idx.unsqueeze(-1).expand(-1, -1, tokens.shape[-1]),
                 dim=1
             )
+            if key_padding_mask is not None:
+                key_padding_mask = key_padding_mask.gather(dim=1, index=idx)
 
         tokens = self.pos.add_flat(tokens, idx)
-        x = self.encoder(tokens)
+        x = self.encoder(tokens, src_key_padding_mask=key_padding_mask)
         return self.norm(x)
         
 
@@ -92,7 +107,13 @@ class MotionPredictor(nn.Module):
             dropout=config.architecture.predictor.dropout
         )
 
-    def forward(self, context: t.Tensor, context_idx: t.Tensor, targets_idx: t.Tensor) -> t.Tensor:
+    def forward(
+        self,
+        context: t.Tensor,
+        context_idx: t.Tensor,
+        targets_idx: t.Tensor,
+        key_padding_mask: t.Tensor | None = None,
+    ) -> t.Tensor:
         B, A = targets_idx.shape
 
         x_context = self.i_proj(context)
@@ -102,7 +123,14 @@ class MotionPredictor(nn.Module):
         x_targets = self.pos.add_flat(x_targets, targets_idx)
 
         x = t.cat([x_context, x_targets], dim=1)
-        x = self.encoder(x)
+
+        full_mask = None
+        if key_padding_mask is not None:
+            context_mask = key_padding_mask.gather(dim=1, index=context_idx)
+            targets_mask = key_padding_mask.gather(dim=1, index=targets_idx)
+            full_mask = t.cat([context_mask, targets_mask], dim=1)
+
+        x = self.encoder(x, src_key_padding_mask=full_mask)
 
         y = self.norm(x[:, -A:, :])
         return self.o_proj(y)
@@ -137,27 +165,44 @@ class MotionJEPA(nn.Module):
                 alpha=1.0 - ema_momentum,
             )
 
-    def forward(self, x: t.Tensor, masks: MaskIndices | None = None) -> tuple[t.Tensor, t.Tensor]: 
+    def forward(
+        self,
+        x: t.Tensor,
+        valid_segments: t.Tensor,
+        masks: MaskIndices | None = None,
+    ) -> tuple[t.Tensor, t.Tensor]:
+
+        batch_size = x.shape[0]
+
+        # A segment is valid only if every frame in it is real (non-padded);
+        # all groups at a given time-segment share that segment's validity,
+        # since token_index = s*group_count + g (see masking.py/components.py).
+        segment_valid = t.arange(self.segment_count, device=x.device).unsqueeze(0) < valid_segments.unsqueeze(1)
+        token_valid = segment_valid.unsqueeze(-1).expand(-1, -1, self.group_count)  # (B, S, G), matches masking.py's scores shape
+        key_padding_mask = ~token_valid.flatten(1, 2)  # (B, S*G), matches the flattened token axis used for gather/attention
 
         # Generate random masks if not provided
-        batch_size = x.shape[0]
         if masks is None:
             masks = mask_mixed(
                 batch_size=batch_size,
                 segment_count=self.segment_count,
                 group_count=self.group_count,
                 device=x.device,
-                targets_p=0.6
+                targets_p=0.6,
+                token_valid=token_valid,
             )
 
-        context = self.student_encoder.forward(x, masks.context) # B, SG, E
+        context = self.student_encoder.forward(x, masks.context, key_padding_mask=key_padding_mask) # B, SG, E
         predict = self.predictor.forward(
             context=context,
             context_idx=masks.context,
-            targets_idx=masks.targets
+            targets_idx=masks.targets,
+            key_padding_mask=key_padding_mask,
         )
 
         with t.no_grad():
-            targets = self.teacher_encoder.forward_full_and_gather(x, masks.targets)
+            targets = self.teacher_encoder.forward_full_and_gather(
+                x, masks.targets, key_padding_mask=key_padding_mask
+            )
 
         return predict, targets

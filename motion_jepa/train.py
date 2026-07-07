@@ -48,6 +48,8 @@ def train(config: DictConfig, output: Path):
     # Standard dataset configuration
     dataset = MotionDataset(
         root=config.data.root,
+        window_size=config.data.window_size,
+        segment_size=config.architecture.segment_size,
         batch_size=config.training.batch_size,
         clip_value=10.0,
         normalize=True,

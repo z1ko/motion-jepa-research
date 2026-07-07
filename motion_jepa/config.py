@@ -1,4 +1,5 @@
 
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -8,6 +9,8 @@ DEFAULT_CONFIG = {
     "data": {
         "root": "data/processed/motion",
         "window_size": 400,
+        "stride": 50,
+        "min_valid_frames": 200,
     },
     "training": {
         "batch_size": 256,
@@ -57,10 +60,10 @@ DEFAULT_CONFIG = {
 def load_config(path: Path | str = "config/experiment.yaml") -> DictConfig:
 
     config_default = OmegaConf.create(DEFAULT_CONFIG)
-    #config_cli = OmegaConf.from_dotlist(sys.argv[1:])
-    #config_file = OmegaConf.load(path)
+    config_cli = OmegaConf.from_dotlist(sys.argv[1:])
+    config_file = OmegaConf.load(path)
 
-    #cfg = OmegaConf.merge(config_default, config_file, config_cli)
-    #return OmegaConf.resolve(cfg) # type: ignore
+    cfg = OmegaConf.merge(config_default, config_file, config_cli)
+    OmegaConf.resolve(cfg)
+    return cfg # type: ignore
 
-    return config_default

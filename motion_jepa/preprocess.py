@@ -18,6 +18,7 @@ import numpy as np
 import polars as pl
 import yaml
 
+from motion_jepa.config import load_config
 from motion_jepa.dataset import MotionDatasetWriter, MotionZarrStore, RunningKinematicsStats, _path_of_normalization_stats, _path_of_samples_index, _path_of_windows_index, stable_suid
 from motion_jepa.types import MotionSample, NormalizationStats
 from motion_jepa.utils import _COLUMNS_EXTRA, _COLUMNS_KINEMATIC, _COLUMNS_METADATA, _GRAVITY_M_S2, _SCALE_SUFFIXES, CHANNELS, JOINTS, MIN_ORIGINAL_HZ, center_root_channels, estimate_original_hz, wrap_to_pi
@@ -325,10 +326,24 @@ def _make_windows_for_sample(
     split: str,
     window_size: int,
     stride: int,
+    min_valid_frames: int,
 ) -> list[dict]:
     rows = []
 
     if num_frames < window_size:
+        # Trial is too short to fill a full window. Emit a single padded
+        # window covering its whole length, as long as it clears the
+        # minimum-valid-length floor; below that there isn't enough real
+        # signal for a meaningful context/target split, so it's dropped.
+        if num_frames >= min_valid_frames:
+            rows.append({
+                "suid": suid,
+                "split": split,
+                "start": 0,
+                "end": int(num_frames),
+                "window_size": int(window_size),
+                "valid_frames": int(num_frames),
+            })
         return rows
 
     for start in range(0, num_frames - window_size + 1, stride):
@@ -340,6 +355,7 @@ def _make_windows_for_sample(
             "start": int(start),
             "end": int(end),
             "window_size": int(window_size),
+            "valid_frames": int(window_size),
         })
 
     return rows
@@ -351,6 +367,7 @@ def generate_splits_and_windows(
     datasets_config: Path | str = "config/datasets.yaml",
     window_length: int = 256,
     stride: int = 128,
+    min_valid_frames: int = 200,
 ) -> None:
     root = Path(root)
 
@@ -384,6 +401,7 @@ def generate_splits_and_windows(
                 split=str(row["split"]),
                 window_size=window_length,
                 stride=stride,
+                min_valid_frames=min_valid_frames,
             )
         )
 
@@ -491,6 +509,7 @@ def compute_and_store_normalization_stats(
 # ================================================================================================================
 
 def main():
+    config = load_config("config/experiment.yaml")
 
     # 1. Load all samples into the zarr dataset
     create_raw_motion_dataset(
@@ -500,13 +519,14 @@ def main():
         hz=100.0,
         overwrite=True
     )
-    
+
     # 2. Generate splits based on whole datasets
     generate_splits_and_windows(
         root="data/processed/motion",
         datasets_config="config/datasets.yaml",
-        window_length=400, # 4s ~ 100hz
-        stride=50, # 0.5 ~ 100hz
+        window_length=config.data.window_size,
+        stride=config.data.stride,
+        min_valid_frames=config.data.min_valid_frames,
     )
 
     # 3. Generate normalization

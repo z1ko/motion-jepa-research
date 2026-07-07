@@ -1,10 +1,12 @@
 
 data:
   root: "data/processed/motion"
+  window_size: 400
+  min_valid_frames: 200
+  stride: 50
 
 training:
   batch_size: 100
-  segment_size: 40
   masks_per_sample: 4
   epochs: 100
   seed: 42
@@ -23,18 +25,22 @@ training:
 
 architecture:
   embed_dim: 256
+  segment_size: 40
+  channels: 4
   encoder:
     mlp_ratio: 4.0
     dropout: 0.0
     heads: 4
     depth: 8
   predictor:
+    inner_dim: 128
     mlp_ratio: 4.0
     dropout: 0.0
     heads: 4
     depth: 8
 
-optimization:
+optim:
+  ema_steps: 100000
   ema_momentum: 0.996
   learning_rate: 0.0005
   weight_decay: 0.05

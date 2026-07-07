@@ -18,14 +18,19 @@ class MotionWindowDataset(T.utils.data.Dataset):
         self,
         root: Path | str,
         *,
+        window_size: int = 400,
+        segment_size: int = 40,
         split: str | None = None,
         normalize: bool = True,
         clip_value: float | None = 10.0,
         dtype: np.dtype | type | str = np.float32,
         return_metadata: bool = False
     ) -> None:
-        
+
         self.root = Path(root)
+        self.window_size = window_size
+        self.segment_size = segment_size
+        self.segment_count = window_size // segment_size
         self.clip_value = clip_value
         self.dtype = np.dtype(dtype)
         self.metadata = return_metadata
@@ -71,7 +76,7 @@ class MotionWindowDataset(T.utils.data.Dataset):
 
         return x
 
-    def __getitem__(self, index: int) -> T.Tensor:
+    def __getitem__(self, index: int) -> dict[str, T.Tensor]:
 
         row = self.rows[index]
         x = self.store.get_kinematics_window(
@@ -84,15 +89,32 @@ class MotionWindowDataset(T.utils.data.Dataset):
         x = center_root_channels(x)
         x = self._normalize(x)
 
+        valid_frames = x.shape[0]
+        if valid_frames < self.window_size:
+            # Short trial: pad the tail up to window_size with zeros. Safe
+            # regardless of fill value since the model masks padded segments
+            # out of attention entirely (see masking.py/architecture/model.py).
+            x_padded = np.zeros((self.window_size, *x.shape[1:]), dtype=self.dtype)
+            x_padded[:valid_frames] = x
+            x = x_padded
+
+        # A segment counts as valid only if every one of its frames is real.
+        valid_segments = min(valid_frames // self.segment_size, self.segment_count)
+
         # Important: np.clip can sometimes return non-contiguous views.
         x_tensor = T.as_tensor(np.ascontiguousarray(x), dtype=T.float32)
-        return x_tensor
+        return {
+            "valid_segments": T.tensor(valid_segments, dtype=T.long),
+            "x": x_tensor,
+        }
     
 class MotionDataset(L.LightningDataModule):
     def __init__(
         self,
         root: Path | str,
         *,
+        window_size: int = 400,
+        segment_size: int = 40,
         batch_size: int = 32,
         num_workers: int = 4,
         normalize: bool = True,
@@ -113,6 +135,8 @@ class MotionDataset(L.LightningDataModule):
 
         self.train = MotionWindowDataset(
             self.root,
+            window_size=window_size,
+            segment_size=segment_size,
             split="train",
             normalize=normalize,
             clip_value=clip_value,
@@ -120,6 +144,8 @@ class MotionDataset(L.LightningDataModule):
 
         self.val = MotionWindowDataset(
             self.root,
+            window_size=window_size,
+            segment_size=segment_size,
             split="val",
             normalize=normalize,
             clip_value=clip_value,
