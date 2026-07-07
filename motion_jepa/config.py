@@ -34,21 +34,21 @@ DEFAULT_CONFIG = {
         "channels": 4,
         "encoder": {
             "mlp_ratio": 4.0,
-            "dropout": 0.0,
+            "dropout": 0.1,
             "heads": 8,
             "depth": 8,
         },
         "predictor": {
             "inner_dim": 128,
             "mlp_ratio": 4.0,
-            "dropout": 0.0,
+            "dropout": 0.1,
             "heads": 8,
             "depth": 5,
         },
     },
     "optim": {
         "ema_steps": 100000,
-        "ema_momentum": 0.995,
+        "ema_momentum": 0.996,
         "learning_rate": 5e-4,
         "weight_decay": 0.05
     }

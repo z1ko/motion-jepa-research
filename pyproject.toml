@@ -13,6 +13,7 @@ dependencies = [
     "pyyaml>=6.0.3",
     "tensorboard>=2.21.0",
     "torch>=2.12.1",
+    "umap-learn>=0.5.9.post2",
     "zarr>=3.2.1",
 ]
 

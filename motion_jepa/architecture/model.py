@@ -9,7 +9,7 @@ from omegaconf import DictConfig
 
 from motion_jepa.architecture.components import TokenEmbed, _encoder
 from motion_jepa.architecture.positional import PositionalEncoding
-from motion_jepa.masking import MaskIndices, mask_random
+from motion_jepa.masking import MaskIndices, mask_mixed
 
 class MotionEncoder(nn.Module):
     def __init__(self, config: DictConfig):
@@ -142,7 +142,7 @@ class MotionJEPA(nn.Module):
         # Generate random masks if not provided
         batch_size = x.shape[0]
         if masks is None:
-            masks = mask_random(
+            masks = mask_mixed(
                 batch_size=batch_size,
                 segment_count=self.segment_count,
                 group_count=self.group_count,
