@@ -67,6 +67,36 @@ _GRAVITY_M_S2 = 9.80665
 
 MIN_ORIGINAL_HZ = 99.0
 
+_ROOT_TRANSLATION_JOINTS = ("pelvis_tx", "pelvis_ty", "pelvis_tz")
+_ROOT_ROTATION_JOINTS = ("pelvis_rotation",)
+
+def wrap_to_pi(x: np.ndarray) -> np.ndarray:
+    return (x + np.pi) % (2.0 * np.pi) - np.pi
+
+def center_root_channels(x: np.ndarray) -> np.ndarray:
+    """Remove the absolute pelvis origin/heading from a kinematics window.
+
+    Mocap labs place their world origin and subject-facing convention
+    arbitrarily, so raw pelvis translation/rotation values leak dataset
+    identity rather than carrying motion information (see e.g. the ~2m gap
+    in pelvis_ty means across datasets). Subtracting the first frame keeps
+    the relative trajectory within the window while discarding that
+    per-lab/per-trial constant offset. Velocities/accelerations are left
+    untouched since they're already invariant to a constant position shift.
+    """
+    x = x.copy()
+    pos_idx = CHANNELS.index("pos")
+
+    for joint in _ROOT_TRANSLATION_JOINTS:
+        j = JOINTS.index(joint)
+        x[:, j, pos_idx] -= x[0, j, pos_idx]
+
+    for joint in _ROOT_ROTATION_JOINTS:
+        j = JOINTS.index(joint)
+        x[:, j, pos_idx] = wrap_to_pi(x[:, j, pos_idx] - x[0, j, pos_idx])
+
+    return x
+
 def ema_linear_scheduler(max_steps: int, global_step: int, ema_momentun: float) -> float:
     if max_steps is None or max_steps <= 0:
         raise ValueError("Linear EMA scheduling requires Trainer(max_steps=...).")

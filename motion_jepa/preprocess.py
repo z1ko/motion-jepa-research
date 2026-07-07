@@ -20,7 +20,7 @@ import yaml
 
 from motion_jepa.dataset import MotionDatasetWriter, MotionZarrStore, RunningKinematicsStats, _path_of_normalization_stats, _path_of_samples_index, _path_of_windows_index, stable_suid
 from motion_jepa.types import MotionSample, NormalizationStats
-from motion_jepa.utils import _COLUMNS_EXTRA, _COLUMNS_KINEMATIC, _COLUMNS_METADATA, _GRAVITY_M_S2, _SCALE_SUFFIXES, CHANNELS, JOINTS, MIN_ORIGINAL_HZ, estimate_original_hz
+from motion_jepa.utils import _COLUMNS_EXTRA, _COLUMNS_KINEMATIC, _COLUMNS_METADATA, _GRAVITY_M_S2, _SCALE_SUFFIXES, CHANNELS, JOINTS, MIN_ORIGINAL_HZ, center_root_channels, estimate_original_hz, wrap_to_pi
 
 # ================================================================================================================
 # SCHEMA
@@ -428,9 +428,6 @@ def signed_log1p_tau(x: np.ndarray) -> np.ndarray:
     )
     return x
 
-def wrap_to_pi(x: np.ndarray) -> np.ndarray:
-    return (x + np.pi) % (2.0 * np.pi) - np.pi
-
 # ================================================================================================================
 # NORMALIZATION
 # ================================================================================================================
@@ -440,36 +437,43 @@ def compute_and_store_normalization_stats(
     root: Path | str,
     split: str = "train",
 ) -> NormalizationStats:
+    """Compute per-channel mean/std over train windows.
+
+    Stats are computed over the same windows (and the same root-centering
+    transform, see `center_root_channels`) that `MotionWindowDataset` feeds
+    to the model, rather than over whole trials - otherwise the fitted
+    mean/std wouldn't match the distribution the model actually trains on.
+    """
     root = Path(root)
 
-    samples = pl.read_parquet(_path_of_samples_index(root))
-    train_samples = samples.filter(pl.col("split") == split)
+    windows = pl.read_parquet(_path_of_windows_index(root))
+    train_windows = windows.filter(pl.col("split") == split)
 
-    if train_samples.height == 0:
-        raise ValueError(f"No samples found for split={split!r}")
+    if train_windows.height == 0:
+        raise ValueError(f"No windows found for split={split!r}")
 
     store = MotionZarrStore(root)
 
-    first = train_samples.row(0, named=True)
-    first_arr = store.get_kinematics(str(first["suid"]))
+    first = train_windows.row(0, named=True)
+    first_arr = store.get_kinematics_window(
+        str(first["suid"]), int(first["start"]), int(first["end"])
+    )
     feature_shape = first_arr.shape[1], first_arr.shape[2]
 
     running = RunningKinematicsStats(shape=feature_shape)
-    for i, row in enumerate(train_samples.iter_rows(named=True), start=1):
-        suid = str(row["suid"])
-        arr = store.get_kinematics(suid)
+    for i, row in enumerate(train_windows.iter_rows(named=True), start=1):
+        x = store.get_kinematics_window(
+            str(row["suid"]), int(row["start"]), int(row["end"])
+        )
+        x = np.asarray(x, dtype=np.float32)
 
-        # Load one full sequence at a time.
-        # For 17k samples, this is usually fine and avoids holding all data.
-        x = np.asarray(arr[:], dtype=np.float32)
-
-        # Apply log1p transform to tau
+        x = center_root_channels(x)
         x = signed_log1p_tau(x)
 
         running.update(x)
 
-        if i % 100 == 0:
-            print(f"[stats] processed {i}/{train_samples.height} train samples")
+        if i % 1000 == 0:
+            print(f"[stats] processed {i}/{train_windows.height} train windows")
 
     stats = running.finalize()
     np.savez(

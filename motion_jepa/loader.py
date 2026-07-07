@@ -10,7 +10,7 @@ import numpy as np
 from torch.utils.data import DataLoader
 
 from motion_jepa.dataset import MotionZarrStore, _path_of_windows_index, load_normalization_stats
-from motion_jepa.utils import signed_log1p_tau
+from motion_jepa.utils import center_root_channels, signed_log1p_tau
 
 
 class MotionWindowDataset(T.utils.data.Dataset):
@@ -81,6 +81,7 @@ class MotionWindowDataset(T.utils.data.Dataset):
         )
 
         x = np.asarray(x, dtype=self.dtype)
+        x = center_root_channels(x)
         x = self._normalize(x)
 
         # Important: np.clip can sometimes return non-contiguous views.

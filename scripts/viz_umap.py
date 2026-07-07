@@ -19,7 +19,7 @@ from motion_jepa.dataset import (
     load_normalization_stats,
 )
 from motion_jepa.jepa import MotionJEPAModule
-from motion_jepa.utils import signed_log1p_tau
+from motion_jepa.utils import center_root_channels, signed_log1p_tau
 
 
 class WindowRowsDataset(Dataset):
@@ -50,6 +50,7 @@ class WindowRowsDataset(Dataset):
             end=int(row["end"]),
         )
         x = np.asarray(x, dtype=np.float32)
+        x = center_root_channels(x)
         x = signed_log1p_tau(x)
         x = (x - self.mean) / self.std
         if self.clip_value is not None:

@@ -9,6 +9,7 @@ import numpy as np
 
 from motion_jepa.dataset import MotionZarrStore, _path_of_normalization_stats, _path_of_windows_index
 from motion_jepa.preprocess import CHANNELS, JOINTS
+from motion_jepa.utils import center_root_channels
 
 def signed_log1p_tau(x: np.ndarray) -> np.ndarray:
     x = np.asarray(x, dtype=np.float32).copy()
@@ -95,6 +96,7 @@ def load_normalized_batch(
             end=int(row["end"]),
         )
 
+        x = center_root_channels(x)
         x = signed_log1p_tau(x)
         x = (x - mean) / std
 
