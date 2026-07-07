@@ -9,53 +9,13 @@ import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
 import torch as t
-from torch.utils.data import DataLoader, Dataset
 
-from motion_jepa.config import load_config
-from motion_jepa.dataset import (
-    MotionZarrStore,
-    _path_of_samples_index,
-    _path_of_windows_index,
-    load_normalization_stats,
+from motion_jepa.eval import (
+    WindowRowsDataset,
+    compute_embeddings,
+    load_encoder,
+    load_window_table,
 )
-from motion_jepa.jepa import MotionJEPAModule
-from motion_jepa.utils import center_root_channels, signed_log1p_tau
-
-
-class WindowRowsDataset(Dataset):
-    def __init__(
-        self,
-        *,
-        root: Path,
-        rows: list[dict],
-        clip_value: float | None = 10.0,
-    ) -> None:
-        self.root = root
-        self.rows = rows
-        self.clip_value = clip_value
-        self.store = MotionZarrStore(root)
-
-        mean, std = load_normalization_stats(root)
-        self.mean = np.asarray(mean, dtype=np.float32)
-        self.std = np.maximum(np.asarray(std, dtype=np.float32), 1e-8)
-
-    def __len__(self) -> int:
-        return len(self.rows)
-
-    def __getitem__(self, index: int) -> t.Tensor:
-        row = self.rows[index]
-        x = self.store.get_kinematics_window(
-            suid=str(row["suid"]),
-            start=int(row["start"]),
-            end=int(row["end"]),
-        )
-        x = np.asarray(x, dtype=np.float32)
-        x = center_root_channels(x)
-        x = signed_log1p_tau(x)
-        x = (x - self.mean) / self.std
-        if self.clip_value is not None:
-            x = np.clip(x, -self.clip_value, self.clip_value)
-        return t.as_tensor(np.ascontiguousarray(x), dtype=t.float32)
 
 
 def parse_args() -> argparse.Namespace:
@@ -64,7 +24,6 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--checkpoint", required=True, type=Path)
     parser.add_argument("--root", default=Path("data/processed/motion"), type=Path)
-    parser.add_argument("--config", default=Path("config/experiment.yaml"), type=Path)
     parser.add_argument("--split", default="eval", choices=["train", "val", "eval"])
     parser.add_argument("--dataset", default=None)
     parser.add_argument("--color-by", default="dataset")
@@ -84,136 +43,6 @@ def resolve_device(device: str) -> t.device:
     if device == "cuda" and not t.cuda.is_available():
         raise RuntimeError("CUDA requested but not available.")
     return t.device(device)
-
-
-def parse_eval_label(dataset: str, trial: str) -> tuple[str | None, str | None, str | None, str]:
-    stem = Path(trial).stem.removesuffix("_stageii")
-    parts = stem.split("_")
-
-    if dataset == "SOMA":
-        action = parts[0] if parts else None
-        return action, None, action, "action" if action else "unknown"
-
-    if dataset == "HumanEva":
-        if parts and parts[-1].isdigit():
-            parts = parts[:-1]
-        action = "_".join(parts) if parts else None
-        return action, None, action, "action" if action else "unknown"
-
-    if dataset == "DanceDB":
-        emotion = parts[1] if len(parts) >= 2 else None
-        return None, emotion, emotion, "emotion" if emotion else "unknown"
-
-    return None, None, None, "unknown"
-
-
-def add_eval_labels(rows: pl.DataFrame) -> pl.DataFrame:
-    if "dataset" not in rows.columns or "trial" not in rows.columns:
-        raise ValueError("Rows must contain 'dataset' and 'trial' to parse eval labels.")
-
-    actions: list[str | None] = []
-    emotions: list[str | None] = []
-    labels: list[str | None] = []
-    kinds: list[str] = []
-
-    for row in rows.select(["dataset", "trial"]).iter_rows(named=True):
-        action, emotion, label, kind = parse_eval_label(
-            dataset=str(row["dataset"]),
-            trial=str(row["trial"]),
-        )
-        actions.append(action)
-        emotions.append(emotion)
-        labels.append(label)
-        kinds.append(kind)
-
-    return rows.with_columns(
-        pl.Series("action", actions, dtype=pl.Utf8),
-        pl.Series("emotion", emotions, dtype=pl.Utf8),
-        pl.Series("eval_label", labels, dtype=pl.Utf8),
-        pl.Series("eval_label_kind", kinds, dtype=pl.Utf8),
-    )
-
-
-def load_window_table(
-    *,
-    root: Path,
-    split: str,
-    dataset: str | None,
-    max_windows: int | None,
-    seed: int,
-) -> pl.DataFrame:
-    windows = pl.read_parquet(_path_of_windows_index(root))
-    samples = pl.read_parquet(_path_of_samples_index(root))
-
-    windows = windows.filter(pl.col("split") == split)
-    if windows.is_empty():
-        raise ValueError(f"No windows found for split={split!r}")
-
-    sample_cols = [col for col in samples.columns if col != "split"]
-    rows = windows.join(samples.select(sample_cols), on="suid", how="left")
-    if rows.select(pl.col("dataset").is_null().any()).item():
-        raise ValueError("Some windows have no matching sample metadata.")
-
-    rows = add_eval_labels(rows)
-
-    if dataset is not None:
-        rows = rows.filter(pl.col("dataset") == dataset)
-        if rows.is_empty():
-            raise ValueError(f"No windows found for split={split!r}, dataset={dataset!r}")
-
-    if max_windows is not None:
-        if max_windows <= 0:
-            raise ValueError("--max-windows must be positive.")
-        if rows.height > max_windows:
-            rows = rows.sample(n=max_windows, seed=seed, shuffle=True)
-
-    return rows
-
-
-def load_encoder(
-    *,
-    checkpoint: Path,
-    config_path: Path,
-    device: t.device,
-) -> t.nn.Module:
-    config = load_config(config_path)
-    module = MotionJEPAModule.load_from_checkpoint(
-        str(checkpoint),
-        config=config,
-        map_location=device,
-        # Lightning checkpoints contain OmegaConf hyperparameters. Use only
-        # checkpoints you created or otherwise trust.
-        weights_only=False,
-    )
-    module.eval()
-    module.to(device)
-    return module.model.teacher_encoder
-
-
-@t.inference_mode()
-def compute_embeddings(
-    *,
-    encoder: t.nn.Module,
-    dataset: WindowRowsDataset,
-    batch_size: int,
-    device: t.device,
-) -> np.ndarray:
-    loader = DataLoader(
-        dataset,
-        batch_size=batch_size,
-        shuffle=False,
-        num_workers=0,
-        pin_memory=(device.type == "cuda"),
-    )
-
-    chunks: list[np.ndarray] = []
-    for batch in loader:
-        batch = batch.to(device, non_blocking=True)
-        tokens = encoder(batch)
-        pooled = tokens.mean(dim=1)
-        chunks.append(pooled.cpu().numpy())
-
-    return np.concatenate(chunks, axis=0)
 
 
 def run_umap(
@@ -365,11 +194,12 @@ def main() -> None:
             f"Unknown --color-by={args.color_by!r}. Available columns: {rows.columns}"
         )
 
-    dataset = WindowRowsDataset(root=args.root, rows=rows.to_dicts())
-    encoder = load_encoder(
-        checkpoint=args.checkpoint,
-        config_path=args.config,
-        device=device,
+    encoder, config = load_encoder(checkpoint=args.checkpoint, device=device)
+    dataset = WindowRowsDataset(
+        root=args.root,
+        rows=rows.to_dicts(),
+        window_size=config.data.window_size,
+        segment_size=config.architecture.segment_size,
     )
 
     embeddings = compute_embeddings(
@@ -377,6 +207,8 @@ def main() -> None:
         dataset=dataset,
         batch_size=args.batch_size,
         device=device,
+        segment_count=config.data.window_size // config.architecture.segment_size,
+        group_count=len(config.training.groups),
     )
     coords = run_umap(
         embeddings=embeddings,
