@@ -1,6 +1,9 @@
 
+import math
+
+import torch as t
+import torch.optim as optim
 import numpy as np
-import torch as T
 
 CHANNELS: list[str] = ["pos", "vel", "acc", "tau"]
 JOINTS: list[str] = [
@@ -92,3 +95,37 @@ def estimate_original_hz(time: np.ndarray) -> float:
         raise ValueError("Could not estimate Hz: no positive time deltas.")
 
     return float(1.0 / np.median(dt))
+
+
+def cosine_schedule_with_warmup(
+    optimizer : optim.Optimizer, 
+    num_warmup_steps: int, 
+    num_training_steps: int, 
+    eta_min_fraction=0.1
+) -> optim.lr_scheduler.LambdaLR:
+    """
+    Create a cosine schedule with warmup using LambdaLR.
+
+    Args:
+        optimizer: The optimizer to schedule.
+        num_warmup_steps: Steps for linear warmup.
+        num_training_steps: Total training steps.
+        eta_min_fraction: Minimum LR as fraction of peak LR (default: 10%).
+
+    Returns:
+        LambdaLR scheduler with cosine-plus-warmup multiplier.
+    """
+
+    def lr_lambda(current_step):
+        if current_step < num_warmup_steps:
+            return float(current_step) / float(max(1, num_warmup_steps))
+        
+        progress = float(current_step - num_warmup_steps) / float(
+            max(1, num_training_steps - num_warmup_steps)
+        )
+
+        # Scale to [eta_min_fraction, 1.0]
+        cosine_factor = 0.5 * (1.0 + math.cos(math.pi * progress))
+        return eta_min_fraction + (1.0 - eta_min_fraction) * cosine_factor
+
+    return optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)

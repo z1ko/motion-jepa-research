@@ -6,7 +6,7 @@ import lightning as L
 from motion_jepa.architecture.model import MotionJEPA
 from motion_jepa.config import DictConfig
 from motion_jepa.metrics import measure_collapse
-from motion_jepa.utils import ema_linear_scheduler
+from motion_jepa.utils import cosine_schedule_with_warmup, ema_linear_scheduler
 
 class MotionJEPAModule(L.LightningModule):
     def __init__(self, config: DictConfig):
@@ -70,10 +70,27 @@ class MotionJEPAModule(L.LightningModule):
         )
 
     # We use AdamW
-    def configure_optimizers(self):
-        return t.optim.AdamW(
+    def configure_optimizers(self): # type: ignore
+        optimizer = t.optim.AdamW(
             (p for p in self.model.parameters() if p.requires_grad),
             weight_decay = self.config.optim.weight_decay,
             lr = self.config.optim.learning_rate,
             betas=(0.9, 0.95),
         )
+
+        # 0.0 -> lr -> lr/10
+        scheduler = cosine_schedule_with_warmup(
+            optimizer=optimizer,
+            num_warmup_steps=2000,
+            num_training_steps=120000,
+            eta_min_fraction=0.1
+        )
+
+        return {
+            "optimizer": optimizer,
+            "lr_scheduler": {
+                "scheduler": scheduler,
+                "interval": "step",
+                "frequency": 1,
+            },
+        }

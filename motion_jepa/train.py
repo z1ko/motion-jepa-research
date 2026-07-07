@@ -1,6 +1,6 @@
 
 
-from lightning.pytorch.callbacks import ModelCheckpoint
+from lightning.pytorch.callbacks import LearningRateMonitor, ModelCheckpoint
 from lightning.pytorch.loggers import TensorBoardLogger
 from omegaconf import DictConfig
 from pathlib import Path
@@ -23,6 +23,7 @@ def train(config: DictConfig, output: Path):
         max_epochs=config.training.epochs,
         default_root_dir=output,
         callbacks=[
+            LearningRateMonitor(logging_interval="step"),
             ModelCheckpoint(
                 filename="best-{epoch:04d}-{val_loss:.4f}",
                 monitor="val_loss",
