@@ -182,7 +182,7 @@ def create_raw_motion_dataset(
     *,
     raw_glob: str,
     output_root: Path | str,
-    hz: float = 60.0,
+    hz: float = 100.0,
     chunk_length: int = 256,
     overwrite: bool = False
 ):
@@ -215,7 +215,7 @@ def create_raw_motion_dataset(
             )
             continue
 
-        sample = resample_to_hz(sample, hz=60.0)
+        sample = resample_to_hz(sample, hz)
         sample = normalize_dynamics(sample)
 
         row = writer.write_sample(suid=suid, sample=sample)

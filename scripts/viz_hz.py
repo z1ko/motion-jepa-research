@@ -216,7 +216,8 @@ def main() -> None:
     parser.add_argument(
         "--raw-glob",
         type=str,
-        required=True,
+        required=False,
+        default="/home/fziche/nas/MAEVE/HUMAN_MODEL/CARE-PD_torque/*.csv",
         help="Glob for CSV files, e.g. '../motion-jepa/data/raw/**/*.csv'",
     )
     parser.add_argument(
@@ -227,7 +228,7 @@ def main() -> None:
     parser.add_argument(
         "--out-dir",
         type=Path,
-        default=Path("hz_analysis"),
+        default=Path("statistics/hz_analysis"),
     )
     parser.add_argument(
         "--max-files",

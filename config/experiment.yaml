@@ -8,7 +8,7 @@ data:
 training:
   batch_size: 512
   masks_per_sample: 4
-  epochs: 600
+  epochs: 1000
   seed: 42
   groups:
     pelvis:                 [0, 1, 2, 3, 4, 5]
@@ -29,18 +29,18 @@ architecture:
   channels: 4
   encoder:
     mlp_ratio: 4.0
-    dropout: 0.1
+    dropout: 0.2
     heads: 8
     depth: 8
   predictor:
     inner_dim: 128
     mlp_ratio: 4.0
-    dropout: 0.1
+    dropout: 0.2
     heads: 8
     depth: 5
 
 optim:
-  ema_steps: 100000
+  ema_steps: 90000
   ema_momentum: 0.996
-  learning_rate: 0.0005
+  learning_rate: 0.001
   weight_decay: 0.05

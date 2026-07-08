@@ -323,7 +323,8 @@ def main() -> None:
     parser.add_argument(
         "--root",
         type=Path,
-        required=True,
+        #required=True,
+        default=Path("data/processed/motion"),
         help="Dataset root containing arrays.zarr, windows.parquet, normalization_stats.npz",
     )
     parser.add_argument(
@@ -346,7 +347,7 @@ def main() -> None:
     parser.add_argument(
         "--out-dir",
         type=Path,
-        default=None,
+        default=Path("statistics/samples"),
     )
 
     args = parser.parse_args()

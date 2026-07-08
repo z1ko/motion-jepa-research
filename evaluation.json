@@ -1,0 +1,259 @@
+{
+  "run": {
+    "checkpoint": "runs/v1/version_10/checkpoints/last.ckpt",
+    "epoch": 999,
+    "global_step": 107000,
+    "config": {
+      "data": {
+        "root": "data/processed/motion",
+        "window_size": 400,
+        "stride": 50,
+        "min_valid_frames": 200
+      },
+      "training": {
+        "batch_size": 512,
+        "masks_per_sample": 4,
+        "epochs": 1000,
+        "seed": 42,
+        "groups": {
+          "pelvis": [
+            0,
+            1,
+            2,
+            3,
+            4,
+            5
+          ],
+          "right_upper_leg": [
+            6,
+            7,
+            8,
+            9
+          ],
+          "right_foot": [
+            10,
+            11,
+            12
+          ],
+          "left_upper_leg": [
+            13,
+            14,
+            15,
+            16
+          ],
+          "left_foot": [
+            17,
+            18,
+            19
+          ],
+          "spine": [
+            20,
+            21,
+            22,
+            23,
+            24,
+            25
+          ],
+          "head": [
+            26,
+            27,
+            28
+          ],
+          "right_shoulder_complex": [
+            29,
+            30,
+            31,
+            35,
+            36,
+            37
+          ],
+          "right_lower_arm": [
+            41,
+            43,
+            45,
+            46
+          ],
+          "left_shoulder_complex": [
+            32,
+            33,
+            34,
+            38,
+            39,
+            40
+          ],
+          "left_lower_arm": [
+            42,
+            44,
+            47,
+            48
+          ]
+        }
+      },
+      "architecture": {
+        "embed_dim": 256,
+        "segment_size": 40,
+        "channels": 4,
+        "encoder": {
+          "mlp_ratio": 4.0,
+          "dropout": 0.2,
+          "heads": 8,
+          "depth": 8
+        },
+        "predictor": {
+          "inner_dim": 128,
+          "mlp_ratio": 4.0,
+          "dropout": 0.2,
+          "heads": 8,
+          "depth": 5
+        }
+      },
+      "optim": {
+        "ema_steps": 90000,
+        "ema_momentum": 0.996,
+        "learning_rate": 0.001,
+        "weight_decay": 0.05
+      }
+    }
+  },
+  "results": [
+    {
+      "n_classes": 11,
+      "classes": [
+        "clap",
+        "dance",
+        "jump",
+        "kick",
+        "lift",
+        "random",
+        "run",
+        "sit",
+        "squat",
+        "throw",
+        "walk"
+      ],
+      "n_folds": 2,
+      "chance_baseline": 0.09090909090909091,
+      "accuracy_mean": 0.339627313511099,
+      "accuracy_std": 0.06103493814453012,
+      "balanced_accuracy_mean": 0.34244557366470135,
+      "balanced_accuracy_std": 0.07449808519997153,
+      "majority_baseline_mean": 0.1188217358373308,
+      "folds": [
+        {
+          "held_out_group": "soma_subject1",
+          "n_test": 302,
+          "accuracy": 0.40066225165562913,
+          "balanced_accuracy": 0.4169436588646729,
+          "majority_baseline_accuracy": 0.1291390728476821
+        },
+        {
+          "held_out_group": "soma_subject2",
+          "n_test": 341,
+          "accuracy": 0.2785923753665689,
+          "balanced_accuracy": 0.2679474884647298,
+          "majority_baseline_accuracy": 0.10850439882697947
+        }
+      ],
+      "dataset": "SOMA",
+      "label_kind": "action",
+      "n_windows": 643,
+      "n_subjects": 2
+    },
+    {
+      "n_classes": 5,
+      "classes": [
+        "Box",
+        "Gestures",
+        "Jog",
+        "ThrowCatch",
+        "Walking"
+      ],
+      "n_folds": 3,
+      "chance_baseline": 0.2,
+      "accuracy_mean": 0.742798353909465,
+      "accuracy_std": 0.010184665572645739,
+      "balanced_accuracy_mean": 0.7438353313353313,
+      "balanced_accuracy_std": 0.05129349362592351,
+      "majority_baseline_mean": 0.23172839506172838,
+      "folds": [
+        {
+          "held_out_group": "S1",
+          "n_test": 100,
+          "accuracy": 0.75,
+          "balanced_accuracy": 0.672027972027972,
+          "majority_baseline_accuracy": 0.26
+        },
+        {
+          "held_out_group": "S2",
+          "n_test": 81,
+          "accuracy": 0.7283950617283951,
+          "balanced_accuracy": 0.7708333333333333,
+          "majority_baseline_accuracy": 0.2222222222222222
+        },
+        {
+          "held_out_group": "S3",
+          "n_test": 108,
+          "accuracy": 0.75,
+          "balanced_accuracy": 0.7886446886446886,
+          "majority_baseline_accuracy": 0.21296296296296297
+        }
+      ],
+      "dataset": "HumanEva",
+      "label_kind": "action",
+      "n_windows": 289,
+      "n_subjects": 3
+    },
+    {
+      "n_classes": 13,
+      "classes": [
+        "Afraid",
+        "Angry",
+        "Annoyed",
+        "Bored",
+        "Excited",
+        "Happy",
+        "Miserable",
+        "Neutral",
+        "Pleased",
+        "Relaxed",
+        "Sad",
+        "Satisfied",
+        "Tired"
+      ],
+      "n_folds": 3,
+      "chance_baseline": 0.07692307692307693,
+      "accuracy_mean": 0.18153766523331738,
+      "accuracy_std": 0.08310016014788309,
+      "balanced_accuracy_mean": 0.19896449704142014,
+      "balanced_accuracy_std": 0.10530182513366403,
+      "majority_baseline_mean": 0.05158730158730159,
+      "folds": [
+        {
+          "held_out_group": "20150927_VasoAristeidou",
+          "n_test": 182,
+          "accuracy": 0.2967032967032967,
+          "balanced_accuracy": 0.3461538461538462,
+          "majority_baseline_accuracy": 0.07142857142857142
+        },
+        {
+          "held_out_group": "20151003_AndriaMichaelidou",
+          "n_test": 299,
+          "accuracy": 0.10367892976588629,
+          "balanced_accuracy": 0.10576923076923077,
+          "majority_baseline_accuracy": 0.0
+        },
+        {
+          "held_out_group": "20151003_ElenaKyriakou",
+          "n_test": 312,
+          "accuracy": 0.14423076923076922,
+          "balanced_accuracy": 0.14497041420118342,
+          "majority_baseline_accuracy": 0.08333333333333333
+        }
+      ],
+      "dataset": "DanceDB",
+      "label_kind": "emotion",
+      "n_windows": 793,
+      "n_subjects": 3
+    }
+  ]
+}
