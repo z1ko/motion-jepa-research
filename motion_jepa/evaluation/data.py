@@ -20,7 +20,7 @@ from motion_jepa.dataset import (
     _path_of_windows_index,
     load_normalization_stats,
 )
-from motion_jepa.utils import center_root_channels, signed_log1p_tau
+from motion_jepa.utils import prepare_window
 
 # ================================================================================================================
 # EVAL LABEL PARSING
@@ -161,7 +161,6 @@ class WindowRowsDataset(Dataset):
         self.rows = rows
         self.window_size = window_size
         self.segment_size = segment_size
-        self.segment_count = window_size // segment_size
         self.clip_value = clip_value
         self._store: MotionZarrStore | None = None
 
@@ -191,22 +190,11 @@ class WindowRowsDataset(Dataset):
             end=int(row["end"]),
         )
 
-        x = np.asarray(x, dtype=np.float32)
-        x = center_root_channels(x)
-        x = signed_log1p_tau(x)
-        x = (x - self.mean) / self.std
-        if self.clip_value is not None:
-            x = np.clip(x, -self.clip_value, self.clip_value)
-
-        valid_frames = x.shape[0]
-        if valid_frames < self.window_size:
-            x_padded = np.zeros((self.window_size, *x.shape[1:]), dtype=np.float32)
-            x_padded[:valid_frames] = x
-            x = x_padded
-
-        valid_segments = min(valid_frames // self.segment_size, self.segment_count)
-
-        return {
-            "x": t.as_tensor(np.ascontiguousarray(x), dtype=t.float32),
-            "valid_segments": t.tensor(valid_segments, dtype=t.long),
-        }
+        return prepare_window(
+            x,
+            window_size=self.window_size,
+            segment_size=self.segment_size,
+            mean=self.mean,
+            std=self.std,
+            clip_value=self.clip_value,
+        )

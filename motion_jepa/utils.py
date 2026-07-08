@@ -115,6 +115,51 @@ def signed_log1p_tau(x: np.ndarray) -> np.ndarray:
     )
     return x
 
+
+def prepare_window(
+    x: np.ndarray,
+    *,
+    window_size: int,
+    segment_size: int,
+    mean: np.ndarray | None,
+    std: np.ndarray | None,
+    clip_value: float | None,
+    dtype: np.dtype = np.float32,
+) -> dict[str, t.Tensor]:
+    """Turn a raw (possibly short) kinematics window into a model-ready sample.
+
+    Shared by every place that reads a window off disk (MotionWindowDataset,
+    MotionRandomCropDataset, WindowRowsDataset) so this pipeline can't drift
+    between them. `x` is (T, D, C) with T <= window_size.
+    """
+    x = np.asarray(x, dtype=dtype)
+    x = center_root_channels(x)
+
+    if mean is not None and std is not None:
+        x = signed_log1p_tau(x)
+        x = (x - mean) / std
+        if clip_value is not None:
+            x = np.clip(x, -clip_value, clip_value)
+
+    valid_frames = x.shape[0]
+    if valid_frames < window_size:
+        # Safe regardless of fill value: padded segments are masked out of
+        # attention entirely (see masking.py/architecture/model.py).
+        x_padded = np.zeros((window_size, *x.shape[1:]), dtype=dtype)
+        x_padded[:valid_frames] = x
+        x = x_padded
+
+    # A segment counts as valid only if every one of its frames is real.
+    segment_count = window_size // segment_size
+    valid_segments = min(valid_frames // segment_size, segment_count)
+
+    # np.clip can sometimes return non-contiguous views.
+    x_tensor = t.as_tensor(np.ascontiguousarray(x), dtype=t.float32)
+    return {
+        "x": x_tensor,
+        "valid_segments": t.tensor(valid_segments, dtype=t.long),
+    }
+
 def estimate_original_hz(time: np.ndarray) -> float:
     time = np.asarray(time, dtype=np.float64)
 

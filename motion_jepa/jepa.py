@@ -19,12 +19,11 @@ class MotionJEPAModule(L.LightningModule):
     # General step
     def _step(self, batch: dict[str, t.Tensor], stage: str):
         motion, valid_segments = batch["x"], batch["valid_segments"]
-        B, T, D, C = motion.shape
+        B = motion.shape[0]
 
         # Masks are generated inside the model.
         predict, targets = self.model(motion, valid_segments=valid_segments)
 
-        # NOTE: WE SHOULD USE SmoothL1 and not MSE, is safer! Also used in the real code of I-JEPA
         loss = f.smooth_l1_loss(predict, targets, beta=1.0)
         self.log(
             f"{stage}/loss", loss.detach().float(), 

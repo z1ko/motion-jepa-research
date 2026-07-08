@@ -5,7 +5,6 @@ from lightning.pytorch.loggers import TensorBoardLogger
 from omegaconf import DictConfig
 from pathlib import Path
 
-import torch as T
 import lightning as L
 
 from motion_jepa.config import load_config
@@ -59,7 +58,6 @@ def train(config: DictConfig, output: Path):
 
     model = MotionJEPAModule(config)
     trainer.fit(model, datamodule=dataset)
-    pass
 
 
 def main():

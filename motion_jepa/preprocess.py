@@ -21,7 +21,7 @@ import yaml
 from motion_jepa.config import load_config
 from motion_jepa.dataset import MotionDatasetWriter, MotionZarrStore, RunningKinematicsStats, _path_of_normalization_stats, _path_of_samples_index, _path_of_windows_index, stable_suid
 from motion_jepa.types import MotionSample, NormalizationStats
-from motion_jepa.utils import _COLUMNS_EXTRA, _COLUMNS_KINEMATIC, _COLUMNS_METADATA, _GRAVITY_M_S2, _SCALE_SUFFIXES, CHANNELS, JOINTS, MIN_ORIGINAL_HZ, center_root_channels, estimate_original_hz, wrap_to_pi
+from motion_jepa.utils import _COLUMNS_EXTRA, _COLUMNS_KINEMATIC, _COLUMNS_METADATA, _GRAVITY_M_S2, _SCALE_SUFFIXES, CHANNELS, JOINTS, MIN_ORIGINAL_HZ, center_root_channels, estimate_original_hz, signed_log1p_tau, wrap_to_pi
 
 # ================================================================================================================
 # SCHEMA
@@ -434,19 +434,6 @@ def generate_splits_and_windows(
     )
 
 # ================================================================================================================
-# UTILITIES
-# ================================================================================================================
-
-# Used for taus
-def signed_log1p_tau(x: np.ndarray) -> np.ndarray:
-    x = x.copy()
-    tau_idx = CHANNELS.index("tau")
-    x[:, :, tau_idx] = np.sign(x[:, :, tau_idx]) * np.log1p(
-        np.abs(x[:, :, tau_idx])
-    )
-    return x
-
-# ================================================================================================================
 # NORMALIZATION
 # ================================================================================================================
 
@@ -514,7 +501,7 @@ def main():
     # 1. Load all samples into the zarr dataset
     create_raw_motion_dataset(
         raw_glob="../motion-jepa/data/raw/**/*.csv",
-        output_root="data/processed/motion",
+        output_root=config.data.root,
         chunk_length=256,
         hz=100.0,
         overwrite=True
@@ -522,7 +509,7 @@ def main():
 
     # 2. Generate splits based on whole datasets
     generate_splits_and_windows(
-        root="data/processed/motion",
+        root=config.data.root,
         datasets_config="config/datasets.yaml",
         window_length=config.data.window_size,
         stride=config.data.stride,
@@ -531,7 +518,7 @@ def main():
 
     # 3. Generate normalization
     compute_and_store_normalization_stats(
-        root="data/processed/motion",
+        root=config.data.root,
         split="train",
     )
 

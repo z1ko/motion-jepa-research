@@ -16,6 +16,7 @@ from motion_jepa.preprocess import (
     JOINTS,
     CHANNELS,
 )
+from motion_jepa.utils import signed_log1p_tau, wrap_to_pi
 
 
 ANGLE_JOINT_INDICES = [
@@ -23,19 +24,6 @@ ANGLE_JOINT_INDICES = [
     for joint in JOINTS
     if joint not in {"pelvis_tx", "pelvis_ty", "pelvis_tz"}
 ]
-
-
-def wrap_to_pi(x: np.ndarray) -> np.ndarray:
-    return (x + np.pi) % (2.0 * np.pi) - np.pi
-
-
-def signed_log1p_tau(x: np.ndarray) -> np.ndarray:
-    x = np.asarray(x, dtype=np.float32).copy()
-    tau_idx = CHANNELS.index("tau")
-    x[:, :, tau_idx] = np.sign(x[:, :, tau_idx]) * np.log1p(
-        np.abs(x[:, :, tau_idx])
-    )
-    return x
 
 
 def training_space_kinematics(x: np.ndarray) -> np.ndarray:

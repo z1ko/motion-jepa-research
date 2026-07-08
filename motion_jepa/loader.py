@@ -16,7 +16,7 @@ from motion_jepa.dataset import (
     _path_of_windows_index,
     load_normalization_stats,
 )
-from motion_jepa.utils import center_root_channels, signed_log1p_tau
+from motion_jepa.utils import prepare_window
 
 
 class MotionWindowDataset(T.utils.data.Dataset):
@@ -30,16 +30,13 @@ class MotionWindowDataset(T.utils.data.Dataset):
         normalize: bool = True,
         clip_value: float | None = 10.0,
         dtype: np.dtype | type | str = np.float32,
-        return_metadata: bool = False
     ) -> None:
 
         self.root = Path(root)
         self.window_size = window_size
         self.segment_size = segment_size
-        self.segment_count = window_size // segment_size
         self.clip_value = clip_value
         self.dtype = np.dtype(dtype)
-        self.metadata = return_metadata
 
         self._store: MotionZarrStore | None = None
 
@@ -48,11 +45,13 @@ class MotionWindowDataset(T.utils.data.Dataset):
             windows = windows.filter(pl.col("split") == split)
 
         self.rows = windows.to_dicts()
+
+        self.mean: np.ndarray | None = None
+        self.std: np.ndarray | None = None
         if normalize:
             mean, std = load_normalization_stats(self.root)
             self.mean = np.asarray(mean, dtype=np.float32)
-            self.std  = np.asarray(std, dtype=np.float32)
-            self.std  = np.maximum(self.std, 1e-8)
+            self.std = np.maximum(np.asarray(std, dtype=np.float32), 1e-8)
 
     @property
     def store(self) -> MotionZarrStore:
@@ -64,23 +63,9 @@ class MotionWindowDataset(T.utils.data.Dataset):
         state = self.__dict__.copy()
         state["_store"] = None
         return state
-    
+
     def __len__(self) -> int:
         return len(self.rows)
-    
-    def _normalize(self, x: np.ndarray) -> np.ndarray:
-        if self.mean is None or self.std is None:
-            return x
-
-        # Same transform used when computing normalization stats.
-        x = signed_log1p_tau(x)
-        # Dataset-wide z-score.
-        x = (x - self.mean) / self.std
-        # Prevent rare acc/vel spikes from dominating loss.
-        if self.clip_value is not None:
-            x = np.clip(x, -self.clip_value, self.clip_value)
-
-        return x
 
     def __getitem__(self, index: int) -> dict[str, T.Tensor]:
 
@@ -91,28 +76,15 @@ class MotionWindowDataset(T.utils.data.Dataset):
             end=int(row["end"]),
         )
 
-        x = np.asarray(x, dtype=self.dtype)
-        x = center_root_channels(x)
-        x = self._normalize(x)
-
-        valid_frames = x.shape[0]
-        if valid_frames < self.window_size:
-            # Short trial: pad the tail up to window_size with zeros. Safe
-            # regardless of fill value since the model masks padded segments
-            # out of attention entirely (see masking.py/architecture/model.py).
-            x_padded = np.zeros((self.window_size, *x.shape[1:]), dtype=self.dtype)
-            x_padded[:valid_frames] = x
-            x = x_padded
-
-        # A segment counts as valid only if every one of its frames is real.
-        valid_segments = min(valid_frames // self.segment_size, self.segment_count)
-
-        # Important: np.clip can sometimes return non-contiguous views.
-        x_tensor = T.as_tensor(np.ascontiguousarray(x), dtype=T.float32)
-        return {
-            "valid_segments": T.tensor(valid_segments, dtype=T.long),
-            "x": x_tensor,
-        }
+        return prepare_window(
+            x,
+            window_size=self.window_size,
+            segment_size=self.segment_size,
+            mean=self.mean,
+            std=self.std,
+            clip_value=self.clip_value,
+            dtype=self.dtype,
+        )
 
 
 def _seed_worker(worker_id: int) -> None:
@@ -177,7 +149,6 @@ class MotionRandomCropDataset(T.utils.data.Dataset):
         self.root = Path(root)
         self.window_size = window_size
         self.segment_size = segment_size
-        self.segment_count = window_size // segment_size
         self.clip_value = clip_value
         self.dtype = np.dtype(dtype)
         self.seed = seed
@@ -236,20 +207,6 @@ class MotionRandomCropDataset(T.utils.data.Dataset):
     def __len__(self) -> int:
         return len(self.index_to_suid)
 
-    def _normalize(self, x: np.ndarray) -> np.ndarray:
-        if self.mean is None or self.std is None:
-            return x
-
-        # Identical transform to MotionWindowDataset._normalize -- kept in
-        # sync manually rather than shared, matching this codebase's
-        # existing convention (see evaluation/data.py's WindowRowsDataset).
-        x = signed_log1p_tau(x)
-        x = (x - self.mean) / self.std
-        if self.clip_value is not None:
-            x = np.clip(x, -self.clip_value, self.clip_value)
-
-        return x
-
     def __getitem__(self, index: int) -> dict[str, T.Tensor]:
         suid = self.index_to_suid[index]
         num_frames = self.num_frames_by_suid[suid]
@@ -269,26 +226,15 @@ class MotionRandomCropDataset(T.utils.data.Dataset):
             start, end = 0, num_frames
 
         x = self.store.get_kinematics_window(suid=suid, start=start, end=end)
-        x = np.asarray(x, dtype=self.dtype)
-        x = center_root_channels(x)
-        x = self._normalize(x)
-
-        valid_frames = x.shape[0]
-        if valid_frames < self.window_size:
-            # Safe regardless of fill value: padded segments are masked out
-            # of attention entirely (see masking.py/architecture/model.py).
-            x_padded = np.zeros((self.window_size, *x.shape[1:]), dtype=self.dtype)
-            x_padded[:valid_frames] = x
-            x = x_padded
-
-        # A segment counts as valid only if every one of its frames is real.
-        valid_segments = min(valid_frames // self.segment_size, self.segment_count)
-
-        x_tensor = T.as_tensor(np.ascontiguousarray(x), dtype=T.float32)
-        return {
-            "valid_segments": T.tensor(valid_segments, dtype=T.long),
-            "x": x_tensor,
-        }
+        return prepare_window(
+            x,
+            window_size=self.window_size,
+            segment_size=self.segment_size,
+            mean=self.mean,
+            std=self.std,
+            clip_value=self.clip_value,
+            dtype=self.dtype,
+        )
 
 
 class MotionDataset(L.LightningDataModule):
@@ -304,7 +250,6 @@ class MotionDataset(L.LightningDataModule):
         normalize: bool = True,
         clip_value: float | None = 10.0,
         pin_memory: bool = True,
-        persistent_workers: bool | None = None,
         drop_last_train: bool = True,
         seed: int = 42,
     ):
@@ -379,15 +324,3 @@ class MotionDataset(L.LightningDataModule):
 
     def val_dataloader(self) -> DataLoader:
         return self._loader(self.val, drop_last=False, shuffle=False)
-    
-
-#dm = MotionDataset(
-#    root="data/processed/motion",
-#    batch_size=4,
-#    num_workers=0,
-#)
-#
-#dm.setup("fit")
-#
-#batch = next(iter(dm.train_dataloader()))
-#print(batch.shape)

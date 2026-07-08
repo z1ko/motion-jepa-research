@@ -7,7 +7,6 @@ data:
 
 training:
   batch_size: 512
-  masks_per_sample: 4
   epochs: 1000
   seed: 42
   groups:

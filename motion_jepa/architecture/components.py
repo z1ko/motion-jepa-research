@@ -1,6 +1,4 @@
 
-from typing import Any
-
 import torch as t
 import torch.nn as nn
 
@@ -60,7 +58,6 @@ class TokenEmbed(nn.Module):
     def __init__(self, config: DictConfig):
         super().__init__()
 
-        self.window_size = config.data.window_size
         self.embed_dim = config.architecture.embed_dim
         self.segment_size = config.architecture.segment_size
         self.channels = config.architecture.channels

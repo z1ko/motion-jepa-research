@@ -14,7 +14,6 @@ DEFAULT_CONFIG = {
     },
     "training": {
         "batch_size": 256,
-        "masks_per_sample": 4,
         "epochs": 600,
         "seed": 42,
         "groups": {

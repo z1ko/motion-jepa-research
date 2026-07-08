@@ -24,9 +24,6 @@ class PositionalEncoding(nn.Module):
     def flat(self) -> t.Tensor:
         return self.grid().flatten(1, 2) # 1, SG, E
 
-    def add_grid(self, x: t.Tensor) -> t.Tensor:
-        return x + self.grid() # B, S, G, E
-
     def add_flat(self, x: t.Tensor, idx: t.Tensor | None = None) -> t.Tensor:
         if idx is not None:
             return x + self.gather(idx)

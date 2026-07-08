@@ -115,9 +115,6 @@ class MotionDatasetWriter:
             "subject": str(sample.subject),
             "trial": str(sample.trial),
             "num_frames": int(kinematics.shape[0]),
-            "timesteps": int(kinematics.shape[0]),
-            "dofs": int(kinematics.shape[1]),
-            "channels": int(kinematics.shape[2]),
         }
 
         if split is not None:
