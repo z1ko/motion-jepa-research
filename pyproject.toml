@@ -21,7 +21,7 @@ dependencies = [
 [project.scripts]
 preprocess = "motion_jepa.preprocess:main"
 train = "motion_jepa.train:main"
-evaluate = "motion_jepa.evaluate:main"
+evaluate = "motion_jepa.evaluation.cli:main"
 
 [build-system]
 requires = ["setuptools>=80"]

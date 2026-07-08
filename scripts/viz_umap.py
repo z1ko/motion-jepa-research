@@ -10,12 +10,8 @@ import numpy as np
 import polars as pl
 import torch as t
 
-from motion_jepa.eval import (
-    WindowRowsDataset,
-    compute_embeddings,
-    load_encoder,
-    load_window_table,
-)
+from motion_jepa.evaluation.data import WindowRowsDataset, load_window_table
+from motion_jepa.evaluation.encoder import compute_embeddings, load_encoder
 
 
 def parse_args() -> argparse.Namespace:

@@ -1,3 +1,9 @@
+"""Loading and labeling windows from the held-out eval datasets.
+
+The held-out eval datasets (SOMA, HumanEva, DanceDB) each encode a downstream
+label in the trial filename rather than as a metadata column, so labels are
+parsed out of the filename and joined onto the window table here.
+"""
 
 from __future__ import annotations
 
@@ -6,7 +12,7 @@ from pathlib import Path
 import numpy as np
 import polars as pl
 import torch as t
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import Dataset
 
 from motion_jepa.dataset import (
     MotionZarrStore,
@@ -14,14 +20,10 @@ from motion_jepa.dataset import (
     _path_of_windows_index,
     load_normalization_stats,
 )
-from motion_jepa.jepa import MotionJEPAModule
 from motion_jepa.utils import center_root_channels, signed_log1p_tau
 
 # ================================================================================================================
 # EVAL LABEL PARSING
-#
-# The held-out eval datasets (SOMA, HumanEva, DanceDB) each encode a downstream
-# label in the trial filename rather than as a metadata column.
 # ================================================================================================================
 
 def parse_eval_label(dataset: str, trial: str) -> tuple[str | None, str | None, str | None, str]:
@@ -110,39 +112,32 @@ def load_window_table(
     return rows
 
 # ================================================================================================================
-# ENCODER LOADING
+# LABEL FILTERING
 # ================================================================================================================
 
-def load_encoder(
-    *,
-    checkpoint: Path | str,
-    device: t.device,
-) -> tuple[t.nn.Module, object]:
-    """Load a trained teacher encoder, reconstructed from ITS OWN saved config.
+def filter_labeled_rows(rows: pl.DataFrame, *, min_label_subjects: int) -> pl.DataFrame:
+    """Drop unlabeled rows and any label seen in too few distinct subjects.
 
-    Deliberately does not accept a `config_path` to override the architecture:
-    `config/experiment.yaml`/`config.py` can (and will) change over the life
-    of the project, but a checkpoint's weights only fit the exact
-    window_size/segment_size/groups/depth/etc. it was trained with. Passing
-    an independently-loaded config here would silently reconstruct the wrong
-    architecture the moment those two drift apart (as they did the moment
-    `load_config` was fixed to actually read the yaml -- see git history).
-    Lightning already stored the real config at train time via
-    `save_hyperparameters`; using that is the only way this stays correct.
+    A label with fewer distinct subjects than `min_label_subjects` can never
+    appear in both the train and held-out side of a leave-subject-out fold,
+    so it's unevaluable noise (e.g. DanceDB's "Haniotikos"/"Mix" -- filename
+    parsing artifacts from trials that don't follow the usual naming
+    convention, each contributed by a single one-off subject).
     """
-    module = MotionJEPAModule.load_from_checkpoint(
-        str(checkpoint),
-        map_location=device,
-        # Lightning checkpoints contain OmegaConf hyperparameters. Use only
-        # checkpoints you created or otherwise trust.
-        weights_only=False,
+    rows = rows.filter(pl.col("eval_label").is_not_null())
+
+    label_subject_counts = (
+        rows.group_by("eval_label")
+        .agg(pl.col("subject").n_unique().alias("n_subjects"))
     )
-    module.eval()
-    module.to(device)
-    return module.model.teacher_encoder, module.config
+    valid_labels = label_subject_counts.filter(
+        pl.col("n_subjects") >= min_label_subjects
+    )["eval_label"].to_list()
+
+    return rows.filter(pl.col("eval_label").is_in(valid_labels))
 
 # ================================================================================================================
-# WINDOW LOADING + EMBEDDING EXTRACTION
+# WINDOW LOADING
 # ================================================================================================================
 
 class WindowRowsDataset(Dataset):
@@ -215,46 +210,3 @@ class WindowRowsDataset(Dataset):
             "x": t.as_tensor(np.ascontiguousarray(x), dtype=t.float32),
             "valid_segments": t.tensor(valid_segments, dtype=t.long),
         }
-
-
-@t.inference_mode()
-def compute_embeddings(
-    *,
-    encoder: t.nn.Module,
-    dataset: Dataset,
-    batch_size: int,
-    device: t.device,
-    segment_count: int,
-    group_count: int,
-) -> np.ndarray:
-    """Run the encoder over every window and mean-pool its tokens into one embedding.
-
-    Padded (short-trial) tokens are excluded from both attention, via a
-    key_padding_mask, and pooling, via a masked mean -- a plain `.mean(dim=1)`
-    would silently dilute embeddings for any window shorter than window_size.
-    """
-    loader = DataLoader(
-        dataset,
-        batch_size=batch_size,
-        shuffle=False,
-        num_workers=0,
-        pin_memory=(device.type == "cuda"),
-    )
-
-    chunks: list[np.ndarray] = []
-    for batch in loader:
-        x = batch["x"].to(device, non_blocking=True)
-        valid_segments = batch["valid_segments"].to(device, non_blocking=True)
-
-        segment_valid = t.arange(segment_count, device=device).unsqueeze(0) < valid_segments.unsqueeze(1)
-        token_valid = segment_valid.unsqueeze(-1).expand(-1, -1, group_count)
-        key_padding_mask = ~token_valid.flatten(1, 2)
-
-        tokens = encoder(x, idx=None, key_padding_mask=key_padding_mask)
-
-        valid_flat = token_valid.flatten(1, 2).float().unsqueeze(-1)
-        pooled = (tokens * valid_flat).sum(dim=1) / valid_flat.sum(dim=1).clamp(min=1.0)
-
-        chunks.append(pooled.cpu().numpy())
-
-    return np.concatenate(chunks, axis=0)
