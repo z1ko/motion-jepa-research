@@ -50,9 +50,11 @@ def train(config: DictConfig, output: Path):
         root=config.data.root,
         window_size=config.data.window_size,
         segment_size=config.architecture.segment_size,
+        min_valid_frames=config.data.min_valid_frames,
         batch_size=config.training.batch_size,
         clip_value=10.0,
         normalize=True,
+        seed=config.training.seed,
     )
 
     model = MotionJEPAModule(config)
