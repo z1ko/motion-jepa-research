@@ -187,7 +187,6 @@ class MotionJEPA(nn.Module):
                 segment_count=self.segment_count,
                 group_count=self.group_count,
                 device=x.device,
-                targets_p=0.6,
                 token_valid=token_valid,
             )
 

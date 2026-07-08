@@ -1,4 +1,5 @@
 
+import random
 from dataclasses import dataclass
 
 import torch as t
@@ -8,49 +9,56 @@ class MaskIndices:
     context: t.Tensor
     targets: t.Tensor
 
-def _num_targets(segment_count: int, group_count: int, targets_p: float) -> int:
-    numel = segment_count * group_count
-    return min(max(1, round(targets_p * numel)), numel - 1)
 
-
-def _num_targets_from_valid(valid_counts: t.Tensor, targets_p: float) -> int:
-    """Like `_num_targets`, but sized from each sample's actual valid
-    (non-padded) token count instead of the fixed segment_count*group_count.
-
-    Uses the batch's minimum valid count so a single, dense `n_targets` is
-    safely satisfiable for every sample without ever needing to select a
-    padded token as a target. Recomputing the ratio against `min_valid`
-    (rather than naively clipping the fixed-shape n_targets) keeps the
-    intended context/target balance for the shortest sample in the batch.
+def _min_valid_segments(token_valid: t.Tensor | None, segment_count: int) -> int:
+    """Batch's shortest valid-segment extent, for sizing/positioning a
+    region so it can never geometrically spill into padding for any sample.
     """
-    min_valid = int(valid_counts.min().item())
-    return min(max(1, round(targets_p * min_valid)), max(min_valid - 1, 1))
+    if token_valid is None:
+        return segment_count
+    return int(token_valid[:, :, 0].sum(dim=1).min().item())  # any group column: expand() made them identical
 
 
-def _rank_to_mask(
-    scores: t.Tensor,
-    n_targets: int,
-    token_valid: t.Tensor | None = None,
-) -> MaskIndices:
-    if token_valid is not None:
-        # Padded tokens must never be picked as prediction targets: forcing
-        # their score to -inf guarantees they always sort into `context`.
-        scores = scores.masked_fill(~token_valid, float("-inf"))
+def _sample_block_targets(
+    segment_count: int,
+    group_count: int,
+    device: t.device,
+    token_valid: t.Tensor | None,
+    *,
+    block_segments: int,
+    block_groups: int,
+) -> tuple[t.Tensor, dict]:
+    """One randomly-positioned block's flat token indices, shared by the
+    whole batch. Clipped to the batch's min_valid segments so it's
+    guaranteed valid for every sample -- no per-sample check needed.
+    """
+    min_valid = _min_valid_segments(token_valid, segment_count)
+    block_segments = min(block_segments, min_valid)
+    block_groups = min(block_groups, group_count)
 
-    permut = scores.flatten(1, 2).argsort(dim=1, descending=True)
-    return MaskIndices(
-        targets=permut[:, :n_targets],
-        context=permut[:, n_targets:],
-    )
+    start = int(t.randint(0, min_valid - block_segments + 1, (1,)).item())
+    groups = t.randperm(group_count, device=device)[:block_groups]
+    seg_idx = t.arange(start, start + block_segments, device=device)
+    targets_flat = (seg_idx.unsqueeze(1) * group_count + groups.unsqueeze(0)).flatten()
+    return targets_flat, {"start": start, "block_segments": block_segments, "groups": groups}
 
 
-def _random_scores(
+def _mask_from_flat_targets(
+    targets_flat: t.Tensor,
     batch_size: int,
     segment_count: int,
     group_count: int,
     device: t.device,
-) -> t.Tensor:
-    return t.rand(batch_size, segment_count, group_count, device=device) * 0.01
+) -> MaskIndices:
+    """Broadcast one shared flat target index set to every row in the batch."""
+    numel = segment_count * group_count
+    is_target = t.zeros(numel, dtype=t.bool, device=device)
+    is_target[targets_flat] = True
+    all_idx = t.arange(numel, device=device)
+    return MaskIndices(
+        targets=all_idx[is_target].unsqueeze(0).expand(batch_size, -1),
+        context=all_idx[~is_target].unsqueeze(0).expand(batch_size, -1),
+    )
 
 
 def mask_random(
@@ -60,15 +68,19 @@ def mask_random(
     device: t.device,
     n_targets: int,
     token_valid: t.Tensor | None = None,
-) -> MaskIndices:
+    return_meta: bool = False,
+) -> MaskIndices | tuple[MaskIndices, dict]:
     """
     returns:
         context_indices: [B, n_context]
         targets_indices: [B, n_targets]
     """
-
-    scores = t.rand(batch_size, segment_count, group_count, device=device)
-    return _rank_to_mask(scores, n_targets, token_valid)
+    min_valid = _min_valid_segments(token_valid, segment_count)
+    valid_numel = min_valid * group_count
+    n_targets = min(max(1, n_targets), valid_numel - 1)
+    targets_flat = t.randperm(valid_numel, device=device)[:n_targets]
+    mask = _mask_from_flat_targets(targets_flat, batch_size, segment_count, group_count, device)
+    return (mask, {}) if return_meta else mask
 
 
 def mask_temporal_blocks(
@@ -76,22 +88,16 @@ def mask_temporal_blocks(
     segment_count: int,
     group_count: int,
     device: t.device,
-    n_targets: int,
+    block_segments: int,
     token_valid: t.Tensor | None = None,
     return_meta: bool = False,
 ) -> MaskIndices | tuple[MaskIndices, dict]:
-    scores = _random_scores(batch_size, segment_count, group_count, device)
-
-    block = max(1, segment_count // 3)
-    max_start = segment_count - block + 1
-    starts = t.randint(max_start, (batch_size,), device=device)
-    time = t.arange(segment_count, device=device).unsqueeze(0)
-    in_block = (time >= starts.unsqueeze(1)) & (time < (starts + block).unsqueeze(1))
-    scores = scores + in_block.unsqueeze(-1).float()
-    mask = _rank_to_mask(scores, n_targets, token_valid)
-    if return_meta:
-        return mask, {"starts": starts, "block": block}
-    return mask
+    targets_flat, meta = _sample_block_targets(
+        segment_count, group_count, device, token_valid,
+        block_segments=block_segments, block_groups=group_count,  # all groups
+    )
+    mask = _mask_from_flat_targets(targets_flat, batch_size, segment_count, group_count, device)
+    return (mask, meta) if return_meta else mask
 
 
 def mask_spatial_blocks(
@@ -99,24 +105,17 @@ def mask_spatial_blocks(
     segment_count: int,
     group_count: int,
     device: t.device,
-    n_targets: int,
+    block_groups: int,
     token_valid: t.Tensor | None = None,
     return_meta: bool = False,
 ) -> MaskIndices | tuple[MaskIndices, dict]:
-    scores = _random_scores(batch_size, segment_count, group_count, device)
-
-    n_groups = max(1, round(group_count * 0.5))
-    group_scores = t.rand(batch_size, group_count, device=device)
-    groups = group_scores.argsort(dim=1)[:, :n_groups]
-    scores.scatter_add_(
-        dim=2,
-        index=groups.unsqueeze(1).expand(-1, segment_count, -1),
-        src=t.ones(batch_size, segment_count, n_groups, device=device),
+    min_valid = _min_valid_segments(token_valid, segment_count)
+    targets_flat, meta = _sample_block_targets(
+        segment_count, group_count, device, token_valid,
+        block_segments=min_valid, block_groups=block_groups,  # full available duration
     )
-    mask = _rank_to_mask(scores, n_targets, token_valid)
-    if return_meta:
-        return mask, {"groups": groups}
-    return mask
+    mask = _mask_from_flat_targets(targets_flat, batch_size, segment_count, group_count, device)
+    return (mask, meta) if return_meta else mask
 
 
 def mask_tube_blocks(
@@ -124,29 +123,17 @@ def mask_tube_blocks(
     segment_count: int,
     group_count: int,
     device: t.device,
-    n_targets: int,
+    block_segments: int,
+    block_groups: int,
     token_valid: t.Tensor | None = None,
     return_meta: bool = False,
 ) -> MaskIndices | tuple[MaskIndices, dict]:
-    scores = _random_scores(batch_size, segment_count, group_count, device)
-
-    block = max(1, segment_count // 3)
-    max_start = segment_count - block + 1
-    starts = t.randint(max_start, (batch_size,), device=device)
-    time = t.arange(segment_count, device=device).unsqueeze(0)
-    in_time = (time >= starts.unsqueeze(1)) & (time < (starts + block).unsqueeze(1))
-
-    n_groups = max(1, round(group_count * 0.5))
-    group_scores = t.rand(batch_size, group_count, device=device)
-    groups = group_scores.argsort(dim=1)[:, :n_groups]
-    in_group = t.zeros(batch_size, group_count, device=device, dtype=t.bool)
-    in_group.scatter_(dim=1, index=groups, value=True)
-
-    scores = scores + (in_time.unsqueeze(-1) & in_group.unsqueeze(1)).float()
-    mask = _rank_to_mask(scores, n_targets, token_valid)
-    if return_meta:
-        return mask, {"starts": starts, "block": block, "groups": groups}
-    return mask
+    targets_flat, meta = _sample_block_targets(
+        segment_count, group_count, device, token_valid,
+        block_segments=block_segments, block_groups=block_groups,
+    )
+    mask = _mask_from_flat_targets(targets_flat, batch_size, segment_count, group_count, device)
+    return (mask, meta) if return_meta else mask
 
 
 def mask_mixed(
@@ -154,59 +141,41 @@ def mask_mixed(
     segment_count: int,
     group_count: int,
     device: t.device,
-    targets_p: float = 0.6,
     token_valid: t.Tensor | None = None,
     return_meta: bool = False,
+    *,
+    temporal_block_segments: int = 6,
+    spatial_block_groups: int = 6,
+    tube_block_segments: int = 4,
+    tube_block_groups: int = 5,
+    random_n_targets: int = 20,
+    weights: tuple[float, float, float, float] = (0.4, 0.2, 0.3, 0.1),
 ) -> MaskIndices | tuple[MaskIndices, dict]:
-    if token_valid is not None:
-        valid_counts = token_valid.flatten(1, 2).sum(dim=1)
-        n_targets = _num_targets_from_valid(valid_counts, targets_p)
+    """Picks ONE strategy for the entire batch (not a per-sample blend) --
+    the whole batch shares one mask, redrawn fresh every call. See the plan
+    write-up: a per-sample-random shared-n_targets design couldn't give
+    temporal/spatial/tube independently controlled, non-degenerate shapes.
+    """
+    strategy = random.choices(
+        ["temporal_blocks", "tube_blocks", "spatial_blocks", "random"], weights=weights, k=1,
+    )[0]
+
+    if strategy == "temporal_blocks":
+        result = mask_temporal_blocks(
+            batch_size, segment_count, group_count, device, temporal_block_segments, token_valid, return_meta,
+        )
+    elif strategy == "tube_blocks":
+        result = mask_tube_blocks(
+            batch_size, segment_count, group_count, device, tube_block_segments, tube_block_groups, token_valid, return_meta,
+        )
+    elif strategy == "spatial_blocks":
+        result = mask_spatial_blocks(
+            batch_size, segment_count, group_count, device, spatial_block_groups, token_valid, return_meta,
+        )
     else:
-        n_targets = _num_targets(segment_count, group_count, targets_p)
+        result = mask_random(batch_size, segment_count, group_count, device, random_n_targets, token_valid, return_meta)
 
-    # return_meta on the sub-calls costs nothing extra: starts/groups are
-    # already computed internally to bias scores either way, this just also
-    # returns them (used by scripts/viz_masks.py to outline the intended
-    # block and label which sub-strategy each sample resolved to).
-    choices = t.rand(batch_size, device=device)
-    temporal_mask, temporal_meta = mask_temporal_blocks(
-        batch_size, segment_count, group_count, device, n_targets, token_valid, return_meta=True
-    ) # type: ignore
-    tube_mask, tube_meta = mask_tube_blocks(
-        batch_size, segment_count, group_count, device, n_targets, token_valid, return_meta=True
-    ) # type: ignore
-    spatial_mask, spatial_meta = mask_spatial_blocks(
-        batch_size, segment_count, group_count, device, n_targets, token_valid, return_meta=True
-    ) # type: ignore
-    random_mask = mask_random(batch_size, segment_count, group_count, device, n_targets, token_valid)
-    masks = (temporal_mask, tube_mask, spatial_mask, random_mask)
-
-    targets = masks[0].targets.clone()
-    context = masks[0].context.clone()
-
-    tube = (choices >= 0.4) & (choices < 0.7)
-    spatial = (choices >= 0.7) & (choices < 0.9)
-    random = choices >= 0.9
-    for select, mask in ((tube, masks[1]), (spatial, masks[2]), (random, masks[3])):
-        targets[select] = mask.targets[select]
-        context[select] = mask.context[select]
-
-    result = MaskIndices(context=context, targets=targets)
     if not return_meta:
         return result
-
-    strategy = ["temporal_blocks"] * batch_size
-    for i in range(batch_size):
-        if tube[i]:
-            strategy[i] = "tube_blocks"
-        elif spatial[i]:
-            strategy[i] = "spatial_blocks"
-        elif random[i]:
-            strategy[i] = "random"
-
-    return result, {
-        "strategy": strategy,
-        "temporal_blocks": temporal_meta,
-        "tube_blocks": tube_meta,
-        "spatial_blocks": spatial_meta,
-    }
+    mask, meta = result
+    return mask, {"strategy": strategy, **meta}
