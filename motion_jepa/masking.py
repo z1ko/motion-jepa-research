@@ -78,7 +78,8 @@ def mask_temporal_blocks(
     device: t.device,
     n_targets: int,
     token_valid: t.Tensor | None = None,
-) -> MaskIndices:
+    return_meta: bool = False,
+) -> MaskIndices | tuple[MaskIndices, dict]:
     scores = _random_scores(batch_size, segment_count, group_count, device)
 
     block = max(1, segment_count // 3)
@@ -87,7 +88,10 @@ def mask_temporal_blocks(
     time = t.arange(segment_count, device=device).unsqueeze(0)
     in_block = (time >= starts.unsqueeze(1)) & (time < (starts + block).unsqueeze(1))
     scores = scores + in_block.unsqueeze(-1).float()
-    return _rank_to_mask(scores, n_targets, token_valid)
+    mask = _rank_to_mask(scores, n_targets, token_valid)
+    if return_meta:
+        return mask, {"starts": starts, "block": block}
+    return mask
 
 
 def mask_spatial_blocks(
@@ -97,7 +101,8 @@ def mask_spatial_blocks(
     device: t.device,
     n_targets: int,
     token_valid: t.Tensor | None = None,
-) -> MaskIndices:
+    return_meta: bool = False,
+) -> MaskIndices | tuple[MaskIndices, dict]:
     scores = _random_scores(batch_size, segment_count, group_count, device)
 
     n_groups = max(1, round(group_count * 0.5))
@@ -108,7 +113,10 @@ def mask_spatial_blocks(
         index=groups.unsqueeze(1).expand(-1, segment_count, -1),
         src=t.ones(batch_size, segment_count, n_groups, device=device),
     )
-    return _rank_to_mask(scores, n_targets, token_valid)
+    mask = _rank_to_mask(scores, n_targets, token_valid)
+    if return_meta:
+        return mask, {"groups": groups}
+    return mask
 
 
 def mask_tube_blocks(
@@ -118,7 +126,8 @@ def mask_tube_blocks(
     device: t.device,
     n_targets: int,
     token_valid: t.Tensor | None = None,
-) -> MaskIndices:
+    return_meta: bool = False,
+) -> MaskIndices | tuple[MaskIndices, dict]:
     scores = _random_scores(batch_size, segment_count, group_count, device)
 
     block = max(1, segment_count // 3)
@@ -134,7 +143,10 @@ def mask_tube_blocks(
     in_group.scatter_(dim=1, index=groups, value=True)
 
     scores = scores + (in_time.unsqueeze(-1) & in_group.unsqueeze(1)).float()
-    return _rank_to_mask(scores, n_targets, token_valid)
+    mask = _rank_to_mask(scores, n_targets, token_valid)
+    if return_meta:
+        return mask, {"starts": starts, "block": block, "groups": groups}
+    return mask
 
 
 def mask_mixed(
@@ -144,20 +156,30 @@ def mask_mixed(
     device: t.device,
     targets_p: float = 0.6,
     token_valid: t.Tensor | None = None,
-) -> MaskIndices:
+    return_meta: bool = False,
+) -> MaskIndices | tuple[MaskIndices, dict]:
     if token_valid is not None:
         valid_counts = token_valid.flatten(1, 2).sum(dim=1)
         n_targets = _num_targets_from_valid(valid_counts, targets_p)
     else:
         n_targets = _num_targets(segment_count, group_count, targets_p)
 
+    # return_meta on the sub-calls costs nothing extra: starts/groups are
+    # already computed internally to bias scores either way, this just also
+    # returns them (used by scripts/viz_masks.py to outline the intended
+    # block and label which sub-strategy each sample resolved to).
     choices = t.rand(batch_size, device=device)
-    masks = (
-        mask_temporal_blocks(batch_size, segment_count, group_count, device, n_targets, token_valid),
-        mask_tube_blocks(batch_size, segment_count, group_count, device, n_targets, token_valid),
-        mask_spatial_blocks(batch_size, segment_count, group_count, device, n_targets, token_valid),
-        mask_random(batch_size, segment_count, group_count, device, n_targets, token_valid),
-    )
+    temporal_mask, temporal_meta = mask_temporal_blocks(
+        batch_size, segment_count, group_count, device, n_targets, token_valid, return_meta=True
+    ) # type: ignore
+    tube_mask, tube_meta = mask_tube_blocks(
+        batch_size, segment_count, group_count, device, n_targets, token_valid, return_meta=True
+    ) # type: ignore
+    spatial_mask, spatial_meta = mask_spatial_blocks(
+        batch_size, segment_count, group_count, device, n_targets, token_valid, return_meta=True
+    ) # type: ignore
+    random_mask = mask_random(batch_size, segment_count, group_count, device, n_targets, token_valid)
+    masks = (temporal_mask, tube_mask, spatial_mask, random_mask)
 
     targets = masks[0].targets.clone()
     context = masks[0].context.clone()
@@ -169,4 +191,22 @@ def mask_mixed(
         targets[select] = mask.targets[select]
         context[select] = mask.context[select]
 
-    return MaskIndices(context=context, targets=targets)
+    result = MaskIndices(context=context, targets=targets)
+    if not return_meta:
+        return result
+
+    strategy = ["temporal_blocks"] * batch_size
+    for i in range(batch_size):
+        if tube[i]:
+            strategy[i] = "tube_blocks"
+        elif spatial[i]:
+            strategy[i] = "spatial_blocks"
+        elif random[i]:
+            strategy[i] = "random"
+
+    return result, {
+        "strategy": strategy,
+        "temporal_blocks": temporal_meta,
+        "tube_blocks": tube_meta,
+        "spatial_blocks": spatial_meta,
+    }
