@@ -172,6 +172,20 @@ def estimate_original_hz(time: np.ndarray) -> float:
     return float(1.0 / np.median(dt))
 
 
+def schedule_with_warmup(
+    optimizer : optim.Optimizer, 
+    num_warmup_steps: int, 
+) -> optim.lr_scheduler.LambdaLR:
+    
+    def lr_lambda(current_step):
+        if current_step < num_warmup_steps:
+            return float(current_step) / float(max(1, num_warmup_steps))
+        
+        return 1.0
+
+    return optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+
+
 def cosine_schedule_with_warmup(
     optimizer : optim.Optimizer, 
     num_warmup_steps: int, 

@@ -5,6 +5,7 @@ from lightning.pytorch.loggers import TensorBoardLogger
 from omegaconf import DictConfig
 from pathlib import Path
 
+import torch as t
 import lightning as L
 
 from motion_jepa.config import load_config
@@ -32,7 +33,7 @@ def train(config: DictConfig, output: Path):
             ),
             ModelCheckpoint(
                 filename="periodic-{epoch:04d}",
-                every_n_epochs=10,
+                every_n_epochs=100,
                 save_top_k=-1,
                 save_last=True,
             )
@@ -57,6 +58,8 @@ def train(config: DictConfig, output: Path):
     )
 
     model = MotionJEPAModule(config)
+
+    t.set_float32_matmul_precision('high')
     trainer.fit(model, datamodule=dataset)
 
 

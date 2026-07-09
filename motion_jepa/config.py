@@ -49,10 +49,12 @@ DEFAULT_CONFIG = {
         },
     },
     "optim": {
-        "ema_steps": 100000,
         "ema_momentum": 0.996,
         "learning_rate": 5e-4,
-        "weight_decay": 0.05
+        "weight_decay": 0.05,
+        "tau_predict": 0.1,
+        "tau_target": 0.06,
+        "center_momentum": 0.9,
     }
 }
 
