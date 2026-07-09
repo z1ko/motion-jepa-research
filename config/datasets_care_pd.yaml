@@ -1,0 +1,4 @@
+# CARE-PD is eval-only: no pretrain_train/pretrain_validation needed.
+validation:
+  - CARE-PD-3DGait
+  - CARE-PD-BMCLab

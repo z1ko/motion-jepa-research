@@ -144,10 +144,10 @@ def mask_mixed(
     token_valid: t.Tensor | None = None,
     return_meta: bool = False,
     *,
-    temporal_block_segments: int = 6,
+    temporal_block_segments: int = 3,
     spatial_block_groups: int = 6,
-    tube_block_segments: int = 4,
-    tube_block_groups: int = 5,
+    tube_block_segments: int = 6,
+    tube_block_groups: int = 6,
     random_n_targets: int = 20,
     weights: tuple[float, float, float, float] = (0.4, 0.2, 0.3, 0.1),
 ) -> MaskIndices | tuple[MaskIndices, dict]:

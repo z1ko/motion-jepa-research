@@ -28,7 +28,13 @@ from pathlib import Path
 
 import torch as t
 
-from motion_jepa.evaluation.data import WindowRowsDataset, filter_labeled_rows, load_window_table
+from motion_jepa.evaluation.data import (
+    WindowRowsDataset,
+    filter_labeled_rows,
+    load_care_pd_labels,
+    load_fixed_folds,
+    load_window_table,
+)
 from motion_jepa.evaluation.encoder import compute_embeddings, load_encoder, read_checkpoint_provenance
 from motion_jepa.evaluation.probes import print_report, run_linear_probe
 
@@ -77,6 +83,19 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument("--out", default=None, type=Path, help="Optional path to write full results as JSON.")
+    parser.add_argument(
+        "--care-pd-labels", default=Path("data/raw/care_pd/carepd_mds_updrs_gait_severity.csv"), type=Path,
+        help="CARE-PD's filename;score MDS-UPDRS-gait table. Only read if a --datasets entry starts with 'CARE-PD-'.",
+    )
+    parser.add_argument(
+        "--care-pd-fold-file", default=None, type=Path,
+        help=(
+            "CARE-PD fold pickle (e.g. folds/UPDRS_Datasets/3DGait_43fold_participants.pkl) -- "
+            "reproduces the paper's own fold assignment instead of our LeaveOneGroupOut. "
+            "Applies to every CARE-PD dataset in --datasets, so evaluate one CARE-PD cohort "
+            "per invocation when using this (different cohorts have different fold files)."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -109,9 +128,12 @@ def evaluate_dataset(
     probe_mlp_hidden: int,
     probe_mlp_max_iter: int,
     compare_pooling: bool = False,
+    care_pd_labels: dict[str, int] | None = None,
+    care_pd_fold_file: Path | None = None,
 ) -> dict | None:
     rows = load_window_table(
         root=root, split=split, dataset=dataset_name, max_windows=max_windows, seed=seed,
+        care_pd_labels=care_pd_labels,
     )
     rows = filter_labeled_rows(rows, min_label_subjects=min_label_subjects)
 
@@ -138,6 +160,9 @@ def evaluate_dataset(
     group_count = len(config.training.groups)
     labels = rows["eval_label"].to_numpy()
     groups = rows["subject"].to_numpy()
+    walk_ids = rows["suid"].to_numpy()
+
+    fold_indices = load_fixed_folds(care_pd_fold_file, groups) if care_pd_fold_file is not None else None
 
     embeddings = compute_embeddings(
         encoder=encoder,
@@ -153,11 +178,13 @@ def evaluate_dataset(
         embeddings=embeddings,
         labels=labels,
         groups=groups,
+        walk_ids=walk_ids,
         probe_c=probe_c,
         probe_max_iter=probe_max_iter,
         probe_knn_k=probe_knn_k,
         probe_mlp_hidden=probe_mlp_hidden,
         probe_mlp_max_iter=probe_mlp_max_iter,
+        fold_indices=fold_indices,
     )
     result.update({
         "dataset": dataset_name,
@@ -189,11 +216,13 @@ def evaluate_dataset(
                 embeddings=alt_embeddings,
                 labels=labels,
                 groups=groups,
+                walk_ids=walk_ids,
                 probe_c=probe_c,
                 probe_max_iter=probe_max_iter,
                 probe_knn_k=probe_knn_k,
                 probe_mlp_hidden=probe_mlp_hidden,
                 probe_mlp_max_iter=probe_mlp_max_iter,
+                fold_indices=fold_indices,
             )
 
     return result
@@ -209,6 +238,10 @@ def main() -> None:
     encoder, config = load_encoder(checkpoint=args.checkpoint, device=device)
     run_info = read_checkpoint_provenance(args.checkpoint, config)
     dataset_names = [d.strip() for d in args.datasets.split(",") if d.strip()]
+
+    care_pd_labels = None
+    if any(name.startswith("CARE-PD-") for name in dataset_names):
+        care_pd_labels = load_care_pd_labels(args.care_pd_labels)
 
     results = []
     for dataset_name in dataset_names:
@@ -229,6 +262,8 @@ def main() -> None:
             probe_mlp_hidden=args.probe_mlp_hidden,
             probe_mlp_max_iter=args.probe_mlp_max_iter,
             compare_pooling=args.compare_pooling,
+            care_pd_labels=care_pd_labels,
+            care_pd_fold_file=args.care_pd_fold_file,
         )
         if result is not None:
             results.append(result)

@@ -184,14 +184,17 @@ def create_raw_motion_dataset(
     output_root: Path | str,
     hz: float = 100.0,
     chunk_length: int = 256,
-    overwrite: bool = False
+    overwrite: bool = False,
+    min_original_hz: float | None = None,
 ):
     output_root = Path(output_root)
+    if min_original_hz is None:
+        min_original_hz = MIN_ORIGINAL_HZ
 
     files = sorted(Path(p) for p in glob.glob(raw_glob, recursive=True))
     if not files:
         raise FileNotFoundError(f"No CSV files found for pattern: {raw_glob}")
-    
+
     writer = MotionDatasetWriter(output_root, chunk_length=chunk_length)
     writer.prepare(overwrite=overwrite)
 
@@ -203,11 +206,11 @@ def create_raw_motion_dataset(
     sample_rows: list[dict] = []
     for i, path in enumerate(files, start=1):
         suid = stable_suid(path)
-        
+
         sample = load_sample_from_csv(Path(path))
 
         original_hz = estimate_original_hz(sample.extra["time"].to_numpy())
-        if original_hz < MIN_ORIGINAL_HZ:
+        if original_hz < min_original_hz:
             skipped_low_hz += 1
             print(
                 f"Skipping low-Hz sample: "
