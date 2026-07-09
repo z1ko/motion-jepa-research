@@ -22,6 +22,10 @@ def train(config: DictConfig, output: Path):
         accelerator="auto",
         max_epochs=config.training.epochs,
         default_root_dir=output,
+        # Default (50) is coarser than one epoch here (~72 steps/epoch at
+        # batch_size=512) -- grad/norm exists specifically to catch a
+        # transient spike, which epoch-level resolution would miss entirely.
+        log_every_n_steps=1,
         callbacks=[
             LearningRateMonitor(logging_interval="step"),
             ModelCheckpoint(

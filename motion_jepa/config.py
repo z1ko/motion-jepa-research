@@ -49,6 +49,7 @@ DEFAULT_CONFIG = {
         },
     },
     "optim": {
+        "loss": "centered_ce",
         "ema_momentum": 0.996,
         "learning_rate": 5e-4,
         "weight_decay": 0.05,

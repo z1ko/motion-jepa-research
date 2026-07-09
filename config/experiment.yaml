@@ -39,9 +39,10 @@ architecture:
     depth: 5
 
 optim:
+  loss: smooth_l1  # or smooth_l1, for the old-loss comparison run on this same architecture
   ema_momentum: 0.999
   learning_rate: 0.001
   weight_decay: 0.05
+  center_momentum: 0.9
   tau_predict: 0.1
   tau_target: 0.06
-  center_momentum: 0.9

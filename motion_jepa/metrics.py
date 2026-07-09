@@ -52,3 +52,42 @@ def measure_collapse(z: T.Tensor, eps: float = 1e-12) -> dict[str, T.Tensor]:
         "top_eig_ratio": top_eig_ratio,
         "l2_mean": z.norm(dim=-1).mean(),
     }
+
+
+@T.no_grad()
+def measure_distillation(p1: T.Tensor, log_p1: T.Tensor, p2: T.Tensor, log_p2: T.Tensor) -> dict[str, T.Tensor]:
+    """Health of the predicted/target softmax distributions (CenteredCrossEntropyLoss).
+
+    p1_entropy/p2_entropy near log(embed_dim) means the distribution is too
+    flat to carry signal; near 0 means it's collapsed onto one dimension --
+    the exact failure mode centering is meant to prevent. argmax_agreement
+    is a soft "accuracy" proxy: how often the predicted distribution's peak
+    dimension matches the target's.
+    """
+    return {
+        "p1_entropy": -(p1 * log_p1).sum(dim=-1).mean(),
+        "p2_entropy": -(p2 * log_p2).sum(dim=-1).mean(),
+        "argmax_agreement": (p1.argmax(-1) == p2.argmax(-1)).float().mean(),
+    }
+
+
+@T.no_grad()
+def measure_teacher_student_similarity(student_params, teacher_params) -> T.Tensor:
+    """Global cosine similarity between the flattened student/teacher encoder weights.
+
+    Not an average of per-tensor cosines (parameter tensors vary wildly in
+    size) -- one cosine over the full concatenated weight vector. Near 1
+    means EMA momentum is too low for distillation to matter; falling
+    steadily apart is expected and healthy.
+    """
+    student_vec = T.cat([p.reshape(-1) for p in student_params])
+    teacher_vec = T.cat([p.reshape(-1) for p in teacher_params])
+    return F.cosine_similarity(student_vec, teacher_vec, dim=0)
+
+
+@T.no_grad()
+def measure_grad_norm(parameters) -> T.Tensor:
+    grads = [p.grad.detach() for p in parameters if p.grad is not None]
+    if not grads:
+        return T.tensor(0.0)
+    return T.norm(T.stack([g.norm(2) for g in grads]), 2)
