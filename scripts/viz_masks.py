@@ -157,9 +157,9 @@ def main() -> None:
         ),
     )
     parser.add_argument("--temporal-block-segments", type=int, default=3)
-    parser.add_argument("--spatial-block-groups", type=int, default=5)
-    parser.add_argument("--tube-block-segments", type=int, default=4)
-    parser.add_argument("--tube-block-groups", type=int, default=5)
+    parser.add_argument("--spatial-block-groups", type=int, default=6)
+    parser.add_argument("--tube-block-segments", type=int, default=6)
+    parser.add_argument("--tube-block-groups", type=int, default=6)
     parser.add_argument("--random-n-targets", type=int, default=20)
     parser.add_argument("--seed", type=int, default=None, help="Fixed seed for reproducible draws. Default: random.")
     parser.add_argument("--out-dir", type=Path, default=Path("statistics/masks"))
