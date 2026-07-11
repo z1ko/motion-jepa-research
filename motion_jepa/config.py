@@ -56,7 +56,10 @@ DEFAULT_CONFIG = {
         "tau_predict": 0.1,
         "tau_target": 0.06,
         "center_momentum": 0.9,
-    }
+    },
+    "resume": {
+        "checkpoint": None,
+    },
 }
 
 def load_config(path: Path | str = "config/experiment.yaml") -> DictConfig:
