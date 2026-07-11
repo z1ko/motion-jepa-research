@@ -212,6 +212,11 @@ def cosine_schedule_with_warmup(
         progress = float(current_step - num_warmup_steps) / float(
             max(1, num_training_steps - num_warmup_steps)
         )
+        # Without this, current_step exceeding num_training_steps (e.g. a
+        # resumed run, or an estimated_stepping_batches mismatch) sends
+        # cos(pi*progress) back past 0 and LR climbs back toward peak
+        # instead of holding at the floor.
+        progress = min(progress, 1.0)
 
         # Scale to [eta_min_fraction, 1.0]
         cosine_factor = 0.5 * (1.0 + math.cos(math.pi * progress))

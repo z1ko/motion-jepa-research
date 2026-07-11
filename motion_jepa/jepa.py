@@ -159,7 +159,15 @@ class MotionJEPAModule(L.LightningModule):
     # max_epochs/dataset size/accumulation), not a hardcoded config value --
     # otherwise the ramp to 1.0 never completes if the run's real step count
     # doesn't match whatever was guessed when ema_steps was set.
-    def on_before_zero_grad(self, optimizer):
+    #
+    # on_train_batch_end, not on_before_zero_grad: the latter fires before
+    # that step's backward()/optimizer.step() (verified against Lightning's
+    # own hook-ordering source), so update_teacher would EMA in the
+    # *previous* step's student weights, not the ones just produced by this
+    # step's optimizer update. on_train_batch_end fires after the full step
+    # (backward + optimizer.step() + zero_grad) completes, so self.global_step
+    # is already incremented and student params already reflect this step.
+    def on_train_batch_end(self, outputs, batch, batch_idx):
         max_steps = int(self.trainer.estimated_stepping_batches)
         ema = ema_linear_scheduler(max_steps, self.global_step, self.config.optim.ema_momentum)
         self.log("optim/ema_momentum", ema, prog_bar=False, on_step=False, on_epoch=True)
