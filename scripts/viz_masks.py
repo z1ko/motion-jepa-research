@@ -61,7 +61,7 @@ def draw_many(
         tv = token_valid_ref[i % ref_batch : i % ref_batch + 1] if token_valid_ref is not None else None
         mask, meta = fn(1, *args, token_valid=tv, return_meta=True, **kwargs)
         targets_list.append(mask.targets[0])
-        metas.append(meta)
+        metas.append(meta[0])  # return_meta now returns a list of B per-sample dicts
     return targets_list, metas
 
 
@@ -157,9 +157,9 @@ def main() -> None:
         ),
     )
     parser.add_argument("--temporal-block-segments", type=int, default=3)
-    parser.add_argument("--spatial-block-groups", type=int, default=6)
+    parser.add_argument("--spatial-block-groups", type=int, default=2, help="Number of whole kinematic chains (of 5).")
     parser.add_argument("--tube-block-segments", type=int, default=6)
-    parser.add_argument("--tube-block-groups", type=int, default=6)
+    parser.add_argument("--tube-block-groups", type=int, default=2, help="Number of whole kinematic chains (of 5).")
     parser.add_argument("--random-n-targets", type=int, default=20)
     parser.add_argument("--seed", type=int, default=None, help="Fixed seed for reproducible draws. Default: random.")
     parser.add_argument("--out-dir", type=Path, default=Path("statistics/masks"))

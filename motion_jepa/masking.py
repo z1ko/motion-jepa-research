@@ -10,55 +10,108 @@ class MaskIndices:
     targets: t.Tensor
 
 
-def _min_valid_segments(token_valid: t.Tensor | None, segment_count: int) -> int:
-    """Batch's shortest valid-segment extent, for sizing/positioning a
-    region so it can never geometrically spill into padding for any sample.
-    """
+# 5 kinematic chains covering all 11 groups exactly once, as group-list
+# indices (see config.training.groups' order in config/experiment.yaml:
+# pelvis, right_upper_leg, right_foot, left_upper_leg, left_foot, spine,
+# head, right_shoulder_complex, right_lower_arm, left_shoulder_complex,
+# left_lower_arm). Chain-based instead of raw contiguous index slices: the
+# group axis isn't a translation-invariant grid like an image, so an
+# arbitrary index-slice can straddle two anatomically unrelated groups (e.g.
+# right_foot + left_upper_leg). Update this if config.training.groups is
+# ever reordered/changed.
+_CHAINS: tuple[tuple[int, ...], ...] = (
+    (1, 2),      # right_leg: right_upper_leg, right_foot
+    (3, 4),      # left_leg: left_upper_leg, left_foot
+    (0, 5, 6),   # torso: pelvis, spine, head
+    (7, 8),      # right_arm: right_shoulder_complex, right_lower_arm
+    (9, 10),     # left_arm: left_shoulder_complex, left_lower_arm
+)
+
+
+def _valid_segments_for(token_valid: t.Tensor | None, sample: int, segment_count: int) -> int:
     if token_valid is None:
         return segment_count
-    return int(token_valid[:, :, 0].sum(dim=1).min().item())  # any group column: expand() made them identical
+    return int(token_valid[sample, :, 0].sum().item())  # any group column, all identical
 
 
-def _sample_block_targets(
+def _sample_chains(n_chains: int, device: t.device) -> t.Tensor:
+    """n_chains whole chains' member group indices, flattened. Chain sizes
+    differ (torso=3, limbs=2), so the resulting group count varies per draw
+    -- reconciled by _build_mask_from_candidates' batch-wide truncation, not
+    here, same as I-JEPA/V-JEPA's own per-sample count variance.
+    """
+    n_chains = min(max(1, n_chains), len(_CHAINS))
+    chosen = random.sample(_CHAINS, n_chains)
+    groups = [g for chain in chosen for g in chain]
+    return t.tensor(groups, device=device, dtype=t.long)
+
+
+def _sample_block_targets_for_sample(
     segment_count: int,
     group_count: int,
     device: t.device,
-    token_valid: t.Tensor | None,
+    valid_segments: int,
     *,
     block_segments: int,
-    block_groups: int,
+    n_chains: int | None,
 ) -> tuple[t.Tensor, dict]:
-    """One randomly-positioned block's flat token indices, shared by the
-    whole batch. Clipped to the batch's min_valid segments so it's
-    guaranteed valid for every sample -- no per-sample check needed.
+    """One sample's randomly-positioned block target indices. n_chains=None
+    means all groups (temporal_blocks); otherwise n_chains whole kinematic
+    chains are selected (spatial_blocks/tube_blocks). Clipped to this
+    sample's OWN valid_segments -- guaranteed valid for this row without
+    reference to any other row in the batch.
     """
-    min_valid = _min_valid_segments(token_valid, segment_count)
-    block_segments = min(block_segments, min_valid)
-    block_groups = min(block_groups, group_count)
+    groups = t.arange(group_count, device=device) if n_chains is None else _sample_chains(n_chains, device)
 
-    start = int(t.randint(0, min_valid - block_segments + 1, (1,)).item())
-    groups = t.randperm(group_count, device=device)[:block_groups]
+    # If every group is covered (all-groups temporal block, or n_chains
+    # happens to span every chain), the block must leave at least one
+    # segment as context -- otherwise the whole valid range becomes target,
+    # this sample's key_padding_mask row is fully True, and softmax
+    # attention NaNs. Mirrors mask_random's `valid_numel - 1` reservation.
+    # Not reachable under this repo's current config values (min_valid_frames
+    # /segment_size keep valid_segments well above block_segments), but
+    # nothing stops a future retune from hitting it.
+    max_block_segments = valid_segments if len(groups) < group_count else max(valid_segments - 1, 1)
+    block_segments = min(block_segments, max_block_segments)
+
+    start = int(t.randint(0, valid_segments - block_segments + 1, (1,)).item())
     seg_idx = t.arange(start, start + block_segments, device=device)
+
     targets_flat = (seg_idx.unsqueeze(1) * group_count + groups.unsqueeze(0)).flatten()
     return targets_flat, {"start": start, "block_segments": block_segments, "groups": groups}
 
 
-def _mask_from_flat_targets(
-    targets_flat: t.Tensor,
-    batch_size: int,
+def _build_mask_from_candidates(
+    candidates: list[t.Tensor],
     segment_count: int,
     group_count: int,
     device: t.device,
 ) -> MaskIndices:
-    """Broadcast one shared flat target index set to every row in the batch."""
+    """Truncate every sample's candidate target set to the batch's minimum
+    count (I-JEPA/V-JEPA's collator trick: fixed shape via truncation, not
+    padding), then build per-sample targets/context. Context is the
+    complement of each sample's own (already-truncated) target set, so both
+    land on the same uniform (B, N) shape for free -- unlike I-JEPA/V-JEPA,
+    whose context is its own independently-sampled region, not a simple
+    complement, and needs its own separate truncation.
+    """
+    n_targets = min(len(c) for c in candidates)
     numel = segment_count * group_count
-    is_target = t.zeros(numel, dtype=t.bool, device=device)
-    is_target[targets_flat] = True
     all_idx = t.arange(numel, device=device)
-    return MaskIndices(
-        targets=all_idx[is_target].unsqueeze(0).expand(batch_size, -1),
-        context=all_idx[~is_target].unsqueeze(0).expand(batch_size, -1),
-    )
+
+    targets_rows, context_rows = [], []
+    for candidate in candidates:
+        if len(candidate) > n_targets:
+            # Random subset, not a fixed slice -- avoids biasing which part
+            # of a temporal block or which chain survives truncation.
+            keep = t.randperm(len(candidate), device=device)[:n_targets]
+            candidate = candidate[keep]
+        is_target = t.zeros(numel, dtype=t.bool, device=device)
+        is_target[candidate] = True
+        targets_rows.append(all_idx[is_target])
+        context_rows.append(all_idx[~is_target])
+
+    return MaskIndices(targets=t.stack(targets_rows, dim=0), context=t.stack(context_rows, dim=0))
 
 
 def mask_random(
@@ -69,18 +122,21 @@ def mask_random(
     n_targets: int,
     token_valid: t.Tensor | None = None,
     return_meta: bool = False,
-) -> MaskIndices | tuple[MaskIndices, dict]:
+) -> MaskIndices | tuple[MaskIndices, list[dict]]:
     """
     returns:
         context_indices: [B, n_context]
         targets_indices: [B, n_targets]
     """
-    min_valid = _min_valid_segments(token_valid, segment_count)
-    valid_numel = min_valid * group_count
-    n_targets = min(max(1, n_targets), valid_numel - 1)
-    targets_flat = t.randperm(valid_numel, device=device)[:n_targets]
-    mask = _mask_from_flat_targets(targets_flat, batch_size, segment_count, group_count, device)
-    return (mask, {}) if return_meta else mask
+    candidates = []
+    for i in range(batch_size):
+        valid_segments = _valid_segments_for(token_valid, i, segment_count)
+        valid_numel = valid_segments * group_count
+        n = min(max(1, n_targets), valid_numel - 1)
+        candidates.append(t.randperm(valid_numel, device=device)[:n])
+
+    mask = _build_mask_from_candidates(candidates, segment_count, group_count, device)
+    return (mask, [{}] * batch_size) if return_meta else mask
 
 
 def mask_temporal_blocks(
@@ -91,13 +147,19 @@ def mask_temporal_blocks(
     block_segments: int,
     token_valid: t.Tensor | None = None,
     return_meta: bool = False,
-) -> MaskIndices | tuple[MaskIndices, dict]:
-    targets_flat, meta = _sample_block_targets(
-        segment_count, group_count, device, token_valid,
-        block_segments=block_segments, block_groups=group_count,  # all groups
-    )
-    mask = _mask_from_flat_targets(targets_flat, batch_size, segment_count, group_count, device)
-    return (mask, meta) if return_meta else mask
+) -> MaskIndices | tuple[MaskIndices, list[dict]]:
+    candidates, metas = [], []
+    for i in range(batch_size):
+        valid_segments = _valid_segments_for(token_valid, i, segment_count)
+        targets_flat, meta = _sample_block_targets_for_sample(
+            segment_count, group_count, device, valid_segments,
+            block_segments=block_segments, n_chains=None,  # all groups
+        )
+        candidates.append(targets_flat)
+        metas.append(meta)
+
+    mask = _build_mask_from_candidates(candidates, segment_count, group_count, device)
+    return (mask, metas) if return_meta else mask
 
 
 def mask_spatial_blocks(
@@ -108,14 +170,20 @@ def mask_spatial_blocks(
     block_groups: int,
     token_valid: t.Tensor | None = None,
     return_meta: bool = False,
-) -> MaskIndices | tuple[MaskIndices, dict]:
-    min_valid = _min_valid_segments(token_valid, segment_count)
-    targets_flat, meta = _sample_block_targets(
-        segment_count, group_count, device, token_valid,
-        block_segments=min_valid, block_groups=block_groups,  # full available duration
-    )
-    mask = _mask_from_flat_targets(targets_flat, batch_size, segment_count, group_count, device)
-    return (mask, meta) if return_meta else mask
+) -> MaskIndices | tuple[MaskIndices, list[dict]]:
+    candidates, metas = [], []
+    for i in range(batch_size):
+        valid_segments = _valid_segments_for(token_valid, i, segment_count)
+        targets_flat, meta = _sample_block_targets_for_sample(
+            segment_count, group_count, device, valid_segments,
+            block_segments=valid_segments,  # full available duration
+            n_chains=block_groups,
+        )
+        candidates.append(targets_flat)
+        metas.append(meta)
+
+    mask = _build_mask_from_candidates(candidates, segment_count, group_count, device)
+    return (mask, metas) if return_meta else mask
 
 
 def mask_tube_blocks(
@@ -127,13 +195,19 @@ def mask_tube_blocks(
     block_groups: int,
     token_valid: t.Tensor | None = None,
     return_meta: bool = False,
-) -> MaskIndices | tuple[MaskIndices, dict]:
-    targets_flat, meta = _sample_block_targets(
-        segment_count, group_count, device, token_valid,
-        block_segments=block_segments, block_groups=block_groups,
-    )
-    mask = _mask_from_flat_targets(targets_flat, batch_size, segment_count, group_count, device)
-    return (mask, meta) if return_meta else mask
+) -> MaskIndices | tuple[MaskIndices, list[dict]]:
+    candidates, metas = [], []
+    for i in range(batch_size):
+        valid_segments = _valid_segments_for(token_valid, i, segment_count)
+        targets_flat, meta = _sample_block_targets_for_sample(
+            segment_count, group_count, device, valid_segments,
+            block_segments=block_segments, n_chains=block_groups,
+        )
+        candidates.append(targets_flat)
+        metas.append(meta)
+
+    mask = _build_mask_from_candidates(candidates, segment_count, group_count, device)
+    return (mask, metas) if return_meta else mask
 
 
 def mask_mixed(
@@ -145,37 +219,49 @@ def mask_mixed(
     return_meta: bool = False,
     *,
     temporal_block_segments: int = 3,
-    spatial_block_groups: int = 6,
+    spatial_block_groups: int = 2,  # of 5 chains -- 6 degenerates to "all chains" (only 5 exist)
     tube_block_segments: int = 6,
-    tube_block_groups: int = 6,
+    tube_block_groups: int = 2,  # of 5 chains, same reason
     random_n_targets: int = 20,
     weights: tuple[float, float, float, float] = (0.4, 0.2, 0.3, 0.1),
-) -> MaskIndices | tuple[MaskIndices, dict]:
-    """Picks ONE strategy for the entire batch (not a per-sample blend) --
-    the whole batch shares one mask, redrawn fresh every call. See the plan
-    write-up: a per-sample-random shared-n_targets design couldn't give
-    temporal/spatial/tube independently controlled, non-degenerate shapes.
+) -> MaskIndices | tuple[MaskIndices, list[dict]]:
+    """Each sample independently draws its own strategy, position, and (for
+    spatial/tube) chain selection -- genuine per-sample diversity, not one
+    shared mask for the whole batch. Different strategies/chain-picks
+    produce different native token counts per sample; reconciled by
+    _build_mask_from_candidates truncating every sample down to the batch's
+    minimum count before stacking, the same fixed-shape-via-truncation trick
+    I-JEPA/V-JEPA use for their own per-sample block-position variance.
     """
-    strategy = random.choices(
-        ["temporal_blocks", "tube_blocks", "spatial_blocks", "random"], weights=weights, k=1,
-    )[0]
+    candidates, metas = [], []
+    for i in range(batch_size):
+        valid_segments = _valid_segments_for(token_valid, i, segment_count)
+        strategy = random.choices(
+            ["temporal_blocks", "tube_blocks", "spatial_blocks", "random"], weights=weights, k=1,
+        )[0]
 
-    if strategy == "temporal_blocks":
-        result = mask_temporal_blocks(
-            batch_size, segment_count, group_count, device, temporal_block_segments, token_valid, return_meta,
-        )
-    elif strategy == "tube_blocks":
-        result = mask_tube_blocks(
-            batch_size, segment_count, group_count, device, tube_block_segments, tube_block_groups, token_valid, return_meta,
-        )
-    elif strategy == "spatial_blocks":
-        result = mask_spatial_blocks(
-            batch_size, segment_count, group_count, device, spatial_block_groups, token_valid, return_meta,
-        )
-    else:
-        result = mask_random(batch_size, segment_count, group_count, device, random_n_targets, token_valid, return_meta)
+        if strategy == "temporal_blocks":
+            targets_flat, meta = _sample_block_targets_for_sample(
+                segment_count, group_count, device, valid_segments,
+                block_segments=temporal_block_segments, n_chains=None,
+            )
+        elif strategy == "tube_blocks":
+            targets_flat, meta = _sample_block_targets_for_sample(
+                segment_count, group_count, device, valid_segments,
+                block_segments=tube_block_segments, n_chains=tube_block_groups,
+            )
+        elif strategy == "spatial_blocks":
+            targets_flat, meta = _sample_block_targets_for_sample(
+                segment_count, group_count, device, valid_segments,
+                block_segments=valid_segments, n_chains=spatial_block_groups,
+            )
+        else:
+            valid_numel = valid_segments * group_count
+            n = min(max(1, random_n_targets), valid_numel - 1)
+            targets_flat, meta = t.randperm(valid_numel, device=device)[:n], {}
 
-    if not return_meta:
-        return result
-    mask, meta = result
-    return mask, {"strategy": strategy, **meta}
+        candidates.append(targets_flat)
+        metas.append({"strategy": strategy, **meta})
+
+    mask = _build_mask_from_candidates(candidates, segment_count, group_count, device)
+    return (mask, metas) if return_meta else mask
