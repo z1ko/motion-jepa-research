@@ -18,6 +18,10 @@ from motion_jepa.jepa import MotionJEPAModule
 # epochs, ...) is safe to change across a resume.
 _ARCHITECTURE_AFFECTING_FIELDS = ["architecture", "training.groups", "data.window_size"]
 
+# Must match the TensorBoardLogger's name= below -- both point at the same
+# runs/<name>/version_N directory.
+_LOGGER_NAME = "v2"
+
 
 def _resolve_resume(config: DictConfig, output: Path) -> tuple[str | None, int | None]:
     """Validate a resume checkpoint and return (ckpt_path, tb_version).
@@ -63,7 +67,7 @@ def _resolve_resume(config: DictConfig, output: Path) -> tuple[str | None, int |
     # trusted to reflect a resumed run's actual config -- this log is the
     # real provenance record, and it's append-only so multi-hop resumes keep
     # their full history instead of overwriting it.
-    log_path = Path(output) / "v1" / version_dir / "resume_log.txt"
+    log_path = Path(output) / _LOGGER_NAME / version_dir / "resume_log.txt"
     with open(log_path, "a") as f:
         f.write(
             f"{datetime.datetime.now().isoformat()} resumed_from={checkpoint} "
@@ -100,7 +104,7 @@ def train(config: DictConfig, output: Path):
             ),
             ModelCheckpoint(
                 filename="periodic-{epoch:04d}",
-                every_n_epochs=100,
+                every_n_epochs=config.training.epochs // 10,
                 save_top_k=-1,
                 save_last=True,
             )
@@ -108,7 +112,7 @@ def train(config: DictConfig, output: Path):
         logger=TensorBoardLogger(
             save_dir=output,
             default_hp_metric=True,
-            name="v2",
+            name=_LOGGER_NAME,
             version=resume_version,
         ),
     )
