@@ -147,6 +147,9 @@ class MotionJEPA(nn.Module):
         # this stays reusable (e.g. scripts/viz_masks.py) without needing a full model.
         self._motion_tokenize_t = TokenizeSegments(config)
         self._motion_tokenize_g = TokenizeGroups(config)
+        
+        self.mamp_target_fraction = config.masking.mamp_target_fraction
+        self.mamp_temperature = config.masking.mamp_temperature
 
         self.student_encoder = MotionEncoder(config)
         self.teacher_encoder = deepcopy(self.student_encoder)
@@ -197,8 +200,8 @@ class MotionJEPA(nn.Module):
                 group_count=self.group_count,
                 device=x.device,
                 motion_intensity=motion_intensity,
-                target_fraction=0.7,
-                temperature=1.5,
+                target_fraction=self.mamp_target_fraction,
+                temperature=self.mamp_temperature,
                 token_valid=token_valid,
             )
 

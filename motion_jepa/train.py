@@ -108,7 +108,7 @@ def train(config: DictConfig, output: Path):
         logger=TensorBoardLogger(
             save_dir=output,
             default_hp_metric=True,
-            name="v1",
+            name="v2",
             version=resume_version,
         ),
     )

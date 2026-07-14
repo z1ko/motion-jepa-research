@@ -57,6 +57,10 @@ DEFAULT_CONFIG = {
         "tau_target": 0.06,
         "center_momentum": 0.9,
     },
+    "masking": {
+        "mamp_target_fraction": 0.0909,
+        "mamp_temperature": 1.0,
+    },
     "resume": {
         "checkpoint": None,
     },

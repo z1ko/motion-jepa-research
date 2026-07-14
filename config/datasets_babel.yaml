@@ -1,0 +1,81 @@
+# BABEL action labels (papers/BABEL.pdf) live inside the same raw AMASS CSVs
+# already used for pretraining (data/raw/amass/<dataset>/**/*.csv, 'action'
+# column). This split makes ACCAD/MoSh/SFU + HumanEva a genuinely held-out,
+# labeled `validation` set (not just a re-probe of already-seen unlabeled
+# motion), and swaps `pretrain_validation` from BMLhandball to HDM05.
+#
+# Decisions made investigating this (see conversation / CARE-PD-REPORT.md):
+#
+# 1. ACCAD/MoSh/SFU -> validation. 45 subjects combined, real BABEL action
+#    coverage (23/20/12 distinct actions), cheap to pull from pretraining
+#    (887/37332 = 2.4% of the real per-epoch training crops -- verified
+#    against MotionRandomCropDataset's actual draw count, not
+#    windows.parquet's inflated stride=50 table).
+#
+# 2. SOMA and DanceDB dropped from `validation`, folded into `pretrain_train`
+#    instead (more unlabeled pretraining signal -- their motion data itself
+#    is fine, they just make weak *eval* instruments). Checked directly:
+#    SOMA has only 2 subjects (11 classes -- LOSO is a single train/test
+#    split, not real cross-validation), DanceDB only 3 subjects and its
+#    label is emotion, not action/gait quality -- a different semantic task
+#    than every other eval set here. In the one trained-vs-random check run
+#    so far SOMA/DanceDB did show gaps (+24.2pp/+8.1pp), but with n=2-3
+#    subjects those are noisy point estimates, not a reliable instrument for
+#    distinguishing between two trained checkpoints.
+#
+# 3. HumanEva kept alone in `validation` from the original three: cleanest
+#    trained-vs-random gap (+20.5pp), action-semantics (not emotion), least
+#    -bad subject count (3) of the three -- still small on its own, but the
+#    least noisy.
+#
+# 4. pretrain_validation: BMLhandball -> HDM05. Checked the raw `action`
+#    column directly: BMLhandball is 100% unlabeled (every row `None`, 0
+#    distinct actions) -- zero semantic content, confirmed against a raw
+#    file. HDM05 has 166 distinct real actions across 54% of its frames
+#    (walk/turn/kick/jump/run/jog/stand/exercise -- broad general motion,
+#    not narrow), 4 subjects, and costs only 1.74% of the training epoch to
+#    remove from pretrain_train (651/37332 crops). BMLhandball folded into
+#    pretrain_train instead of dropped -- still real unlabeled motion, no
+#    reason to waste it now that it's not serving as the val-loss set.
+#
+# Both moves are into `pretrain_validation` (only touched by evaluate's
+# --eval-* flags, i.e. the training loop's own loss/val is 400/1864 crops of
+# BMLhandball computed automatically every epoch on the "val" split) vs
+# `validation` (only touched when you explicitly run the eval CLI, no
+# training-loop side effects) -- deliberately not interchangeable, see the
+# loss/val-comparability discussion in the conversation.
+
+pretrain_train:
+  - BMLrub
+  - Eyes_Japan_Dataset
+  - HUMAN4D
+  - TCDHands
+  - WEIZMANN
+  - CMU
+  - DFaust
+  - GRAB
+  - MOYO_smplx_neutral
+  - TotalCapture
+  - BMLmovi
+  - CNRS
+  - EKUT
+  - KIT
+  - PosePrior
+  - SSM
+  - Transitions
+  - DanceDB
+  - SOMA
+  - BMLhandball
+
+# Training loop's own val loss (loss/val, ModelCheckpoint(monitor="val_loss"))
+# -- automatically consumed every epoch. Kept deliberately separate from the
+# probe-only `validation` split below.
+pretrain_validation:
+  - HDM05
+
+# Probe-only held-out eval (evaluation/cli.py). Never touched by training.
+validation:
+  - HumanEva
+  - ACCAD
+  - MoSh
+  - SFU

@@ -2,22 +2,28 @@
 
 Extracts a frozen embedding per window from the teacher encoder and fits a
 linear classifier (logistic regression) on top of it, to measure how much
-downstream-task-relevant information (action/emotion) the representation
+downstream-task-relevant information (action label) the representation
 carries -- the standard linear-probe protocol for self-supervised encoders.
 
-Evaluated on the three held-out datasets (see config/datasets.yaml's
-`validation` section): SOMA/HumanEva (action label) and DanceDB (emotion
-label), each parsed from the trial filename by
-`motion_jepa.evaluation.data.parse_eval_label`.
+Evaluated on the current `validation` split (see config/datasets_babel.yaml):
+HumanEva (action, parsed from the trial filename by
+`motion_jepa.evaluation.data.parse_eval_label`) and ACCAD/MoSh/SFU (action,
+parsed from BABEL frame-level labels in the raw AMASS CSVs, since those three
+have no filename-encoded label of their own -- see `_BABEL_DATASETS` below
+and `motion_jepa.evaluation.babel`). SOMA/DanceDB were dropped from this
+default set: too few subjects (2-3) for a reliable instrument, and DanceDB's
+label (emotion) is a different semantic task than the others (see
+CARE-PD-REPORT.md and the conversation that led here). This is the suite
+used to score model checkpoints after training.
 
 Cross-validation is leave-one-subject-out (grouped by subject, never by
 window), since:
   - adjacent/overlapping windows from the same trial are highly correlated,
     so a random window-level split would leak and overstate accuracy.
-  - these datasets have very few subjects (2-5), so held-out-subject
-    generalization is both the meaningful question ("does the embedding
-    encode this label for a person it never saw") and the only split that
-    doesn't waste the little data available.
+  - these datasets have few subjects, so held-out-subject generalization is
+    both the meaningful question ("does the embedding encode this label for
+    a person it never saw") and the only split that doesn't waste the
+    little data available.
 """
 
 from __future__ import annotations
@@ -38,7 +44,13 @@ from motion_jepa.evaluation.data import (
 from motion_jepa.evaluation.encoder import compute_embeddings, compute_token_embeddings, load_encoder, read_checkpoint_provenance
 from motion_jepa.evaluation.probes import print_report, run_attentive_probe, run_dmu_probe, run_linear_probe
 
-DEFAULT_DATASETS = ["SOMA", "HumanEva", "DanceDB"]
+DEFAULT_DATASETS = ["HumanEva", "ACCAD", "MoSh", "SFU"]
+
+# These have no filename-encoded label of their own (see parse_eval_label) --
+# routed through BABEL frame-level labels (motion_jepa.evaluation.babel)
+# instead, automatically, regardless of what --babel-raw-root defaults to.
+# HumanEva keeps filename-based parsing.
+_BABEL_DATASETS = {"ACCAD", "MoSh", "SFU"}
 
 # ================================================================================================================
 # CLI
@@ -143,14 +155,13 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
-        "--babel-raw-root", default=None, type=Path,
+        "--babel-raw-root", default=Path("data/raw/amass"), type=Path,
         help=(
-            "If set, attach BABEL frame-level action labels read from raw AMASS CSVs under "
-            "this root (e.g. data/raw/amass) instead of filename/CARE-PD label parsing -- for "
-            "datasets like ACCAD/MoSh/SFU with no filename-encoded label of their own (see "
-            "config/datasets_babel.yaml). Use with --split train, since these datasets are "
-            "still config/datasets.yaml's pretrain_train -- see CARE-PD-REPORT.md's caveat on "
-            "evaluating labels for motion the encoder has already seen unlabeled."
+            "Root of raw AMASS CSVs, used to attach BABEL frame-level action labels for "
+            "datasets in _BABEL_DATASETS (ACCAD/MoSh/SFU) that have no filename-encoded label "
+            "of their own (see config/datasets_babel.yaml, motion_jepa.evaluation.babel). "
+            "Applied automatically only to those datasets -- HumanEva and any other "
+            "--datasets entry still use filename/CARE-PD label parsing regardless of this flag."
         ),
     )
     return parser.parse_args()
@@ -370,7 +381,7 @@ def main() -> None:
             dmu_reference_label=args.dmu_reference_label,
             care_pd_labels=care_pd_labels,
             care_pd_fold_file=args.care_pd_fold_file,
-            babel_raw_root=args.babel_raw_root,
+            babel_raw_root=args.babel_raw_root if dataset_name in _BABEL_DATASETS else None,
         )
         if result is not None:
             results.append(result)

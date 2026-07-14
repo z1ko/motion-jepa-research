@@ -1,13 +1,13 @@
 
 data:
   root: "data/processed/motion"
-  window_size: 400
+  window_size: 200
   min_valid_frames: 200
   stride: 50
 
 training:
-  batch_size: 512
-  epochs: 200
+  batch_size: 256
+  epochs: 100
   seed: 42
   groups:
     pelvis:                 [0, 1, 2, 3, 4, 5]
@@ -24,25 +24,29 @@ training:
 
 architecture:
   embed_dim: 256
-  segment_size: 40
+  segment_size: 20
   channels: 4
   encoder:
     mlp_ratio: 4.0
-    dropout: 0.2
+    dropout: 0.15
     heads: 8
-    depth: 8
+    depth: 4
   predictor:
     inner_dim: 256
     mlp_ratio: 4.0
-    dropout: 0.2
+    dropout: 0.15
     heads: 8
-    depth: 5
+    depth: 2
 
 optim:
-  loss: smooth_l1  # or smooth_l1, for the old-loss comparison run on this same architecture
-  ema_momentum: 0.999
+  loss: centered_ce  # or smooth_l1, for the old-loss comparison run on this same architecture
+  ema_momentum: 0.9999
   learning_rate: 0.001
-  weight_decay: 0.05
+  weight_decay: 0.1
   center_momentum: 0.9
   tau_predict: 0.1
-  tau_target: 0.06
+  tau_target: 0.1
+
+masking:
+  mamp_target_fraction: 0.7
+  mamp_temperature: 1.2

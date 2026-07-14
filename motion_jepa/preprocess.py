@@ -447,18 +447,18 @@ def main():
     config = load_config("config/experiment.yaml")
 
     # 1. Load all samples into the zarr dataset
-    create_raw_motion_dataset(
-        raw_glob="../motion-jepa/data/raw/**/*.csv",
-        output_root=config.data.root,
-        chunk_length=256,
-        hz=100.0,
-        overwrite=True
-    )
+    #create_raw_motion_dataset(
+    #    raw_glob="data/raw/amass/**/*.csv",
+    #    output_root=config.data.root,
+    #    chunk_length=256,
+    #    hz=100.0,
+    #    overwrite=True
+    #)
 
     # 2. Generate splits based on whole datasets
     assign_dataset_splits(
         root=config.data.root,
-        datasets_config="config/datasets.yaml",
+        datasets_config="config/datasets_babel.yaml",
     )
 
     # 3. Generate normalization
