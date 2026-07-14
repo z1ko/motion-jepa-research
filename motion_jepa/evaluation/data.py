@@ -18,7 +18,7 @@ from torch.utils.data import Dataset
 from motion_jepa.dataset import (
     MotionZarrStore,
     _path_of_samples_index,
-    _path_of_windows_index,
+    enumerate_windows,
     load_normalization_stats,
 )
 from motion_jepa.evaluation.babel import attach_babel_labels
@@ -112,13 +112,24 @@ def load_window_table(
     *,
     root: Path | str,
     split: str,
+    window_size: int,
+    stride: int,
+    min_valid_frames: int,
     dataset: str | None = None,
     max_windows: int | None = None,
     seed: int = 42,
     care_pd_labels: dict[str, int] | None = None,
     babel_raw_root: Path | str | None = None,
 ) -> pl.DataFrame:
-    """Join windows.parquet with samples.parquet and attach eval labels.
+    """Enumerate windows straight from samples.parquet and attach eval labels.
+
+    `window_size`/`stride`/`min_valid_frames` are no longer baked into a
+    precomputed windows.parquet (see dataset.enumerate_windows) -- pass them
+    explicitly. Different eval roots have historically used different
+    strides (e.g. CARE-PD's eval store was built dense at stride=50 for
+    walk-level majority-vote robustness, vs. the main pretrain corpus's
+    non-overlapping stride==window_size) -- there's no single safe default,
+    so the caller must state its own.
 
     `babel_raw_root`: if set, attach BABEL frame-level action labels (read
     from raw AMASS CSVs under this root, see evaluation.babel) instead of
@@ -127,12 +138,21 @@ def load_window_table(
     `care_pd_labels` in practice (one eval run targets one label source).
     """
     root = Path(root)
-    windows = pl.read_parquet(_path_of_windows_index(root))
     samples = pl.read_parquet(_path_of_samples_index(root))
+    split_samples = samples.filter(pl.col("split") == split)
 
-    windows = windows.filter(pl.col("split") == split)
-    if windows.is_empty():
+    window_rows: list[dict] = []
+    for row in split_samples.select(["suid", "num_frames"]).iter_rows(named=True):
+        suid = str(row["suid"])
+        for start, end in enumerate_windows(
+            num_frames=int(row["num_frames"]), window_size=window_size,
+            stride=stride, min_valid_frames=min_valid_frames,
+        ):
+            window_rows.append({"suid": suid, "start": start, "end": end})
+
+    if not window_rows:
         raise ValueError(f"No windows found for split={split!r}")
+    windows = pl.DataFrame(window_rows, schema={"suid": pl.Utf8, "start": pl.Int64, "end": pl.Int64})
 
     sample_cols = [col for col in samples.columns if col != "split"]
     rows = windows.join(samples.select(sample_cols), on="suid", how="left")

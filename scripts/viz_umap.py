@@ -26,6 +26,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch-size", default=256, type=int)
     parser.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda"])
     parser.add_argument("--max-windows", default=None, type=int)
+    parser.add_argument("--eval-window-size", default=None, type=int)
+    parser.add_argument("--eval-stride", default=None, type=int)
+    parser.add_argument("--eval-min-valid-frames", default=None, type=int)
     parser.add_argument("--out", default=None, type=Path)
     parser.add_argument("--seed", default=42, type=int)
     parser.add_argument("--n-neighbors", default=15, type=int)
@@ -178,19 +181,22 @@ def main() -> None:
         dataset_name = "" if args.dataset is None else f"_{args.dataset}"
         out = Path("outputs") / f"umap_{args.split}{dataset_name}_{args.color_by}.png"
 
+    encoder, config = load_encoder(checkpoint=args.checkpoint, device=device)
+
     rows = load_window_table(
         root=args.root,
         split=args.split,
         dataset=args.dataset,
         max_windows=args.max_windows,
         seed=args.seed,
+        window_size=args.eval_window_size or config.data.window_size,
+        stride=args.eval_stride or config.data.stride,
+        min_valid_frames=args.eval_min_valid_frames or config.data.min_valid_frames,
     )
     if args.color_by not in rows.columns:
         raise ValueError(
             f"Unknown --color-by={args.color_by!r}. Available columns: {rows.columns}"
         )
-
-    encoder, config = load_encoder(checkpoint=args.checkpoint, device=device)
     dataset = WindowRowsDataset(
         root=args.root,
         rows=rows.to_dicts(),

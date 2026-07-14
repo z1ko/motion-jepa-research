@@ -7,7 +7,7 @@ import matplotlib.pylab as plt
 import polars as pl
 import numpy as np
 
-from motion_jepa.dataset import MotionZarrStore, _path_of_normalization_stats, _path_of_windows_index
+from motion_jepa.dataset import MotionZarrStore, _path_of_normalization_stats, _path_of_samples_index, enumerate_windows
 from motion_jepa.preprocess import CHANNELS, JOINTS
 from motion_jepa.utils import center_root_channels, signed_log1p_tau
 
@@ -17,11 +17,23 @@ def sample_windows(
     n: int,
     split: str | None,
     seed: int,
+    window_size: int = 400,
+    stride: int = 400,
+    min_valid_frames: int = 200,
 ) -> pl.DataFrame:
-    windows = pl.read_parquet(_path_of_windows_index(root))
-
+    samples = pl.read_parquet(_path_of_samples_index(root))
     if split is not None:
-        windows = windows.filter(pl.col("split") == split)
+        samples = samples.filter(pl.col("split") == split)
+
+    window_rows: list[dict] = []
+    for row in samples.select(["suid", "num_frames"]).iter_rows(named=True):
+        suid = str(row["suid"])
+        for start, end in enumerate_windows(
+            num_frames=int(row["num_frames"]), window_size=window_size,
+            stride=stride, min_valid_frames=min_valid_frames,
+        ):
+            window_rows.append({"suid": suid, "start": start, "end": end})
+    windows = pl.DataFrame(window_rows, schema={"suid": pl.Utf8, "start": pl.Int64, "end": pl.Int64})
 
     if windows.height == 0:
         raise ValueError(f"No windows found for split={split!r}")

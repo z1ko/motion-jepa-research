@@ -118,6 +118,7 @@ def train(config: DictConfig, output: Path):
         root=config.data.root,
         window_size=config.data.window_size,
         segment_size=config.architecture.segment_size,
+        stride=config.data.stride,
         min_valid_frames=config.data.min_valid_frames,
         batch_size=config.training.batch_size,
         clip_value=10.0,

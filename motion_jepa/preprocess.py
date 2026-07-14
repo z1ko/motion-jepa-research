@@ -12,14 +12,13 @@ Layout of one CSV file (378 columns, all rows = one subject/trial):
 
 import glob
 from pathlib import Path
-from typing import Any
 
 import numpy as np
 import polars as pl
 import yaml
 
 from motion_jepa.config import load_config
-from motion_jepa.dataset import MotionDatasetWriter, MotionZarrStore, RunningKinematicsStats, _path_of_normalization_stats, _path_of_samples_index, _path_of_windows_index, stable_suid
+from motion_jepa.dataset import MotionDatasetWriter, MotionZarrStore, RunningKinematicsStats, _path_of_normalization_stats, _path_of_samples_index, enumerate_windows, stable_suid
 from motion_jepa.types import MotionSample, NormalizationStats
 from motion_jepa.utils import _COLUMNS_EXTRA, _COLUMNS_KINEMATIC, _COLUMNS_METADATA, _GRAVITY_M_S2, _SCALE_SUFFIXES, CHANNELS, JOINTS, MIN_ORIGINAL_HZ, center_root_channels, estimate_original_hz, signed_log1p_tau, wrap_to_pi
 
@@ -322,60 +321,23 @@ def _assign_dataset_splits(
         .alias("split")
     )
 
-def _make_windows_for_sample(
-    *,
-    suid: str,
-    num_frames: int,
-    split: str,
-    window_size: int,
-    stride: int,
-    min_valid_frames: int,
-) -> list[dict]:
-    rows = []
-
-    if num_frames < window_size:
-        # Trial is too short to fill a full window. Emit a single padded
-        # window covering its whole length, as long as it clears the
-        # minimum-valid-length floor; below that there isn't enough real
-        # signal for a meaningful context/target split, so it's dropped.
-        if num_frames >= min_valid_frames:
-            rows.append({
-                "suid": suid,
-                "split": split,
-                "start": 0,
-                "end": int(num_frames),
-                "window_size": int(window_size),
-                "valid_frames": int(num_frames),
-            })
-        return rows
-
-    for start in range(0, num_frames - window_size + 1, stride):
-        end = start + window_size
-
-        rows.append({
-            "suid": suid,
-            "split": split,
-            "start": int(start),
-            "end": int(end),
-            "window_size": int(window_size),
-            "valid_frames": int(window_size),
-        })
-
-    return rows
-
-
-def generate_splits_and_windows(
+def assign_dataset_splits(
     *,
     root: Path | str,
     datasets_config: Path | str = "config/datasets.yaml",
-    window_length: int = 256,
-    stride: int = 128,
-    min_valid_frames: int = 200,
 ) -> None:
-    root = Path(root)
+    """Tag each sample with its dataset-level split (train/val/eval) and
+    write it back to samples.parquet.
 
+    Window enumeration used to be precomputed here too (windows.parquet);
+    it's now derived on the fly, at read time, straight from `num_frames`
+    (see `dataset.enumerate_windows` and its two consumers,
+    `loader.MotionWindowDataset` and `evaluation.data.load_window_table`) --
+    window_size/stride/min_valid_frames aren't fixed at prep time anymore,
+    they're passed explicitly by whoever reads the samples.
+    """
+    root = Path(root)
     samples_path = _path_of_samples_index(root)
-    windows_path = _path_of_windows_index(root)
 
     samples = pl.read_parquet(samples_path)
 
@@ -395,24 +357,7 @@ def generate_splits_and_windows(
             f"Some samples could not be assigned to a split:\n{bad}"
         )
 
-    window_rows: list[dict[str, Any]] = []
-    for row in samples.iter_rows(named=True):
-        window_rows.extend(
-            _make_windows_for_sample(
-                suid=str(row["suid"]),
-                num_frames=int(row["num_frames"]),
-                split=str(row["split"]),
-                window_size=window_length,
-                stride=stride,
-                min_valid_frames=min_valid_frames,
-            )
-        )
-
-    windows = pl.DataFrame(window_rows)
-
-    # Store updated parquets
     samples.write_parquet(samples_path)
-    windows.write_parquet(windows_path)
 
     print("Dataset-level split complete")
     print("----------------------------")
@@ -426,16 +371,6 @@ def generate_splits_and_windows(
         .sort("split")
     )
 
-    print()
-    print("Windows")
-    print("-------")
-    print(
-        windows
-        .group_by("split")
-        .len()
-        .sort("split")
-    )
-
 # ================================================================================================================
 # NORMALIZATION
 # ================================================================================================================
@@ -443,6 +378,9 @@ def generate_splits_and_windows(
 def compute_and_store_normalization_stats(
     *,
     root: Path | str,
+    window_size: int,
+    stride: int,
+    min_valid_frames: int,
     split: str = "train",
 ) -> NormalizationStats:
     """Compute per-channel mean/std over train windows.
@@ -454,25 +392,32 @@ def compute_and_store_normalization_stats(
     """
     root = Path(root)
 
-    windows = pl.read_parquet(_path_of_windows_index(root))
-    train_windows = windows.filter(pl.col("split") == split)
+    samples = pl.read_parquet(_path_of_samples_index(root))
+    samples = samples.filter(pl.col("split") == split)
 
-    if train_windows.height == 0:
+    if samples.height == 0:
+        raise ValueError(f"No samples found for split={split!r}")
+
+    train_windows: list[tuple[str, int, int]] = []
+    for row in samples.select(["suid", "num_frames"]).iter_rows(named=True):
+        for start, end in enumerate_windows(
+            num_frames=int(row["num_frames"]), window_size=window_size,
+            stride=stride, min_valid_frames=min_valid_frames,
+        ):
+            train_windows.append((str(row["suid"]), start, end))
+
+    if not train_windows:
         raise ValueError(f"No windows found for split={split!r}")
 
     store = MotionZarrStore(root)
 
-    first = train_windows.row(0, named=True)
-    first_arr = store.get_kinematics_window(
-        str(first["suid"]), int(first["start"]), int(first["end"])
-    )
+    first_suid, first_start, first_end = train_windows[0]
+    first_arr = store.get_kinematics_window(first_suid, first_start, first_end)
     feature_shape = first_arr.shape[1], first_arr.shape[2]
 
     running = RunningKinematicsStats(shape=feature_shape)
-    for i, row in enumerate(train_windows.iter_rows(named=True), start=1):
-        x = store.get_kinematics_window(
-            str(row["suid"]), int(row["start"]), int(row["end"])
-        )
+    for i, (suid, start, end) in enumerate(train_windows, start=1):
+        x = store.get_kinematics_window(suid, start, end)
         x = np.asarray(x, dtype=np.float32)
 
         x = center_root_channels(x)
@@ -481,7 +426,7 @@ def compute_and_store_normalization_stats(
         running.update(x)
 
         if i % 1000 == 0:
-            print(f"[stats] processed {i}/{train_windows.height} train windows")
+            print(f"[stats] processed {i}/{len(train_windows)} train windows")
 
     stats = running.finalize()
     np.savez(
@@ -511,17 +456,17 @@ def main():
     )
 
     # 2. Generate splits based on whole datasets
-    generate_splits_and_windows(
+    assign_dataset_splits(
         root=config.data.root,
         datasets_config="config/datasets.yaml",
-        window_length=config.data.window_size,
-        stride=config.data.stride,
-        min_valid_frames=config.data.min_valid_frames,
     )
 
     # 3. Generate normalization
     compute_and_store_normalization_stats(
         root=config.data.root,
+        window_size=config.data.window_size,
+        stride=config.data.stride,
+        min_valid_frames=config.data.min_valid_frames,
         split="train",
     )
 

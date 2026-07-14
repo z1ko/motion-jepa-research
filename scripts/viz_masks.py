@@ -215,7 +215,9 @@ def main() -> None:
     # if the val split has fewer windows than needed.
     window_dataset = MotionWindowDataset(
         root=config.data.root, window_size=config.data.window_size,
-        segment_size=config.architecture.segment_size, split="val",
+        segment_size=config.architecture.segment_size,
+        stride=config.data.stride, min_valid_frames=config.data.min_valid_frames,
+        split="val",
     )
     tokenize_t = TokenizeSegments(config)
     tokenize_g = TokenizeGroups(config)

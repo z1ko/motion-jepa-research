@@ -39,7 +39,9 @@ def cli() -> argparse.Namespace:
 
 def visualize(args: argparse.Namespace):
 
-    dataset = MotionWindowDataset(root=args.root, normalize=True, clip_value=10.0)
+    dataset = MotionWindowDataset(
+        root=args.root, stride=400, min_valid_frames=200, normalize=True, clip_value=10.0,
+    )
     seq: np.ndarray = np.asarray(dataset[args.index]["x"], dtype=np.float32)
 
     fig, axes = plt.subplots(49, 1, figsize=(10, 80), sharex=True, sharey=True)

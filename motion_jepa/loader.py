@@ -13,7 +13,7 @@ from torch.utils.data import DataLoader
 from motion_jepa.dataset import (
     MotionZarrStore,
     _path_of_samples_index,
-    _path_of_windows_index,
+    enumerate_windows,
     load_normalization_stats,
 )
 from motion_jepa.utils import prepare_window
@@ -26,6 +26,8 @@ class MotionWindowDataset(T.utils.data.Dataset):
         *,
         window_size: int = 400,
         segment_size: int = 40,
+        stride: int,
+        min_valid_frames: int,
         split: str | None = None,
         normalize: bool = True,
         clip_value: float | None = 10.0,
@@ -40,11 +42,22 @@ class MotionWindowDataset(T.utils.data.Dataset):
 
         self._store: MotionZarrStore | None = None
 
-        windows = pl.read_parquet(_path_of_windows_index(self.root))
+        samples = pl.read_parquet(_path_of_samples_index(self.root))
         if split is not None:
-            windows = windows.filter(pl.col("split") == split)
+            samples = samples.filter(pl.col("split") == split)
 
-        self.rows = windows.to_dicts()
+        # Deterministic sliding-window enumeration computed here, straight
+        # from each trial's num_frames -- see dataset.enumerate_windows. No
+        # precomputed windows.parquet needed; this is why val stays fixed
+        # across epochs (see class docstring on MotionRandomCropDataset).
+        self.rows: list[dict] = []
+        for row in samples.select(["suid", "num_frames"]).iter_rows(named=True):
+            suid = str(row["suid"])
+            for start, end in enumerate_windows(
+                num_frames=int(row["num_frames"]), window_size=window_size,
+                stride=stride, min_valid_frames=min_valid_frames,
+            ):
+                self.rows.append({"suid": suid, "start": start, "end": end})
 
         self.mean: np.ndarray | None = None
         self.std: np.ndarray | None = None
@@ -244,6 +257,7 @@ class MotionDataset(L.LightningDataModule):
         *,
         window_size: int = 400,
         segment_size: int = 40,
+        stride: int = 400,
         min_valid_frames: int = 200,
         batch_size: int = 32,
         num_workers: int = 4,
@@ -284,6 +298,8 @@ class MotionDataset(L.LightningDataModule):
             self.root,
             window_size=window_size,
             segment_size=segment_size,
+            stride=stride,
+            min_valid_frames=min_valid_frames,
             split="val",
             normalize=normalize,
             clip_value=clip_value,

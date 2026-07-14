@@ -53,6 +53,25 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--split", default="eval")
     parser.add_argument("--datasets", default=",".join(DEFAULT_DATASETS), help="Comma-separated dataset names.")
     parser.add_argument(
+        "--eval-window-size", default=None, type=int,
+        help="Window size for eval windows (default: the checkpoint's own config.data.window_size).",
+    )
+    parser.add_argument(
+        "--eval-stride", default=None, type=int,
+        help=(
+            "Stride between eval windows (default: the checkpoint's own config.data.stride, i.e. "
+            "non-overlapping). Windows are enumerated on the fly from samples.parquet, not a "
+            "precomputed table -- different eval roots have historically used different strides "
+            "(e.g. CARE-PD's store was built dense at stride=50 for walk-level majority-vote "
+            "robustness), so pass this explicitly for CARE-PD datasets instead of relying on the "
+            "default."
+        ),
+    )
+    parser.add_argument(
+        "--eval-min-valid-frames", default=None, type=int,
+        help="Minimum real frames for a short trial to still get a padded window (default: the checkpoint's own config.data.min_valid_frames).",
+    )
+    parser.add_argument(
         "--min-label-subjects",
         default=2,
         type=int,
@@ -158,6 +177,9 @@ def evaluate_dataset(
     device: t.device,
     batch_size: int,
     max_windows: int | None,
+    eval_window_size: int | None = None,
+    eval_stride: int | None = None,
+    eval_min_valid_frames: int | None = None,
     min_label_subjects: int,
     seed: int,
     probe_c: float,
@@ -179,6 +201,9 @@ def evaluate_dataset(
 ) -> dict | None:
     rows = load_window_table(
         root=root, split=split, dataset=dataset_name, max_windows=max_windows, seed=seed,
+        window_size=eval_window_size or config.data.window_size,
+        stride=eval_stride or config.data.stride,
+        min_valid_frames=eval_min_valid_frames or config.data.min_valid_frames,
         care_pd_labels=care_pd_labels, babel_raw_root=babel_raw_root,
     )
     rows = filter_labeled_rows(rows, min_label_subjects=min_label_subjects)
@@ -325,6 +350,9 @@ def main() -> None:
             device=device,
             batch_size=args.batch_size,
             max_windows=args.max_windows,
+            eval_window_size=args.eval_window_size,
+            eval_stride=args.eval_stride,
+            eval_min_valid_frames=args.eval_min_valid_frames,
             min_label_subjects=args.min_label_subjects,
             seed=args.seed,
             probe_c=args.probe_c,

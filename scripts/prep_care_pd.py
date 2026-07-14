@@ -2,7 +2,7 @@
 import argparse
 from pathlib import Path
 
-from motion_jepa.preprocess import create_raw_motion_dataset, generate_splits_and_windows
+from motion_jepa.preprocess import assign_dataset_splits, create_raw_motion_dataset
 
 # Only these sub-cohorts have both OpenSim-style CSVs AND an MDS-UPDRS-gait
 # label (see papers/CarePD.pdf Table 1). DNE/E-LC/KUL-DT-T have CSVs now too
@@ -53,9 +53,20 @@ def main() -> None:
     parser.add_argument("--pretrain-root", type=Path, default=Path("data/processed/motion"))
     parser.add_argument("--datasets-config", type=Path, default=Path("config/datasets_care_pd.yaml"))
     parser.add_argument("--hz", type=float, default=100.0)
-    parser.add_argument("--window-size", type=int, default=400)
-    parser.add_argument("--stride", type=int, default=50)
-    parser.add_argument("--min-valid-frames", type=int, default=200)
+    parser.add_argument(
+        "--window-size", type=int, default=400,
+        help="Not used here (windows are enumerated at eval time, not prep time) -- "
+             "informational only, pass the same value to evaluate's --eval-window-size.",
+    )
+    parser.add_argument(
+        "--stride", type=int, default=50,
+        help="Not used here -- pass to evaluate's --eval-stride (CARE-PD's historical "
+             "dense-overlap value; the main pretrain corpus instead used stride==window_size).",
+    )
+    parser.add_argument(
+        "--min-valid-frames", type=int, default=200,
+        help="Not used here -- pass to evaluate's --eval-min-valid-frames.",
+    )
     args = parser.parse_args()
 
     build_tree(samples_dir=args.samples_dir, tree_dir=args.tree_dir)
@@ -72,13 +83,7 @@ def main() -> None:
         min_original_hz=0,
     )
 
-    generate_splits_and_windows(
-        root=args.output_root,
-        datasets_config=args.datasets_config,
-        window_length=args.window_size,
-        stride=args.stride,
-        min_valid_frames=args.min_valid_frames,
-    )
+    assign_dataset_splits(root=args.output_root, datasets_config=args.datasets_config)
 
     # Reuse the pretrain corpus's normalization -- never compute CARE-PD's
     # own. Relative symlink so it stays in sync if the pretrain stats are
@@ -89,6 +94,11 @@ def main() -> None:
         norm_link.unlink()
     norm_link.symlink_to(norm_target)
     print(f"[norm] {norm_link} -> {norm_target}")
+    print(
+        f"[eval] windows are enumerated at eval time now -- pass --eval-window-size "
+        f"{args.window_size} --eval-stride {args.stride} --eval-min-valid-frames "
+        f"{args.min_valid_frames} to `evaluate` for this store."
+    )
 
 
 if __name__ == "__main__":

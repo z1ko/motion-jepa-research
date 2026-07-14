@@ -21,6 +21,23 @@ def _path_of_windows_index(root: Path) -> Path:
 def _path_of_normalization_stats(root: Path) -> Path:
     return root / "normalization_stats.npz"
 
+def enumerate_windows(num_frames: int, window_size: int, stride: int, min_valid_frames: int) -> list[tuple[int, int]]:
+    """Deterministic sliding-window (start, end) positions for one trial.
+
+    Pure function of the trial's own length -- computable at read time
+    directly from samples.parquet's `num_frames`, no precomputed windows.parquet
+    needed (see motion_jepa/loader.py's MotionWindowDataset and
+    motion_jepa/evaluation/data.py's load_window_table, the two consumers).
+    """
+    if num_frames < window_size:
+        # Trial too short to fill a full window: one padded window covering
+        # its whole length, as long as it clears the minimum-valid-length
+        # floor (below that there isn't enough real signal for a meaningful
+        # context/target split).
+        return [(0, num_frames)] if num_frames >= min_valid_frames else []
+
+    return [(start, start + window_size) for start in range(0, num_frames - window_size + 1, stride)]
+
 def _path_of_sample_group(suid: str) -> str:
     return f"samples/{suid}"
 

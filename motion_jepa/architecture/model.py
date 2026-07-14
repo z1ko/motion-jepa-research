@@ -197,7 +197,7 @@ class MotionJEPA(nn.Module):
                 group_count=self.group_count,
                 device=x.device,
                 motion_intensity=motion_intensity,
-                target_fraction=0.9,
+                target_fraction=0.7,
                 temperature=1.5,
                 token_valid=token_valid,
             )
