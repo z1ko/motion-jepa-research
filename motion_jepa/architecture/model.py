@@ -141,6 +141,7 @@ class MotionJEPA(nn.Module):
 
         self.segment_count = config.data.window_size // config.architecture.segment_size
         self.group_count = len(config.training.groups)
+        self.channels = config.architecture.channels
 
         # Dedicated instances for compute_motion_intensity (masking.py's "mamp"
         # strategy) -- decoupled from student_encoder.embed's own tokenizers so
@@ -182,6 +183,13 @@ class MotionJEPA(nn.Module):
 
         batch_size = x.shape[0]
 
+        # config.architecture.channels selects how many of the trailing
+        # CHANNELS (pos, vel, acc, tau -- see utils.py) the model actually
+        # sees, keeping their existing order: 4 is everything, 3 drops tau,
+        # etc. Only correct because tau is last in CHANNELS -- dropping a
+        # non-trailing channel would need an index_select, not a slice.
+        x = x[..., :self.channels]
+
         # A segment is valid only if every frame in it is real (non-padded);
         # all groups at a given time-segment share that segment's validity,
         # since token_index = s*group_count + g (see masking.py/components.py).
@@ -203,7 +211,7 @@ class MotionJEPA(nn.Module):
                 target_fraction=self.mamp_target_fraction,
                 temperature=self.mamp_temperature,
                 token_valid=token_valid,
-            )
+            ) # type: ignore
 
         context = self.student_encoder.forward(x, masks.context, key_padding_mask=key_padding_mask) # B, SG, E
         predict = self.predictor.forward(
