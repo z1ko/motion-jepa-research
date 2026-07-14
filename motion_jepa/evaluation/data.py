@@ -21,6 +21,7 @@ from motion_jepa.dataset import (
     _path_of_windows_index,
     load_normalization_stats,
 )
+from motion_jepa.evaluation.babel import attach_babel_labels
 from motion_jepa.utils import prepare_window
 
 # ================================================================================================================
@@ -115,8 +116,16 @@ def load_window_table(
     max_windows: int | None = None,
     seed: int = 42,
     care_pd_labels: dict[str, int] | None = None,
+    babel_raw_root: Path | str | None = None,
 ) -> pl.DataFrame:
-    """Join windows.parquet with samples.parquet and attach eval labels."""
+    """Join windows.parquet with samples.parquet and attach eval labels.
+
+    `babel_raw_root`: if set, attach BABEL frame-level action labels (read
+    from raw AMASS CSVs under this root, see evaluation.babel) instead of
+    filename/CARE-PD label parsing -- for datasets like ACCAD/MoSh/SFU that
+    have no filename-encoded label of their own. Mutually exclusive with
+    `care_pd_labels` in practice (one eval run targets one label source).
+    """
     root = Path(root)
     windows = pl.read_parquet(_path_of_windows_index(root))
     samples = pl.read_parquet(_path_of_samples_index(root))
@@ -130,7 +139,10 @@ def load_window_table(
     if rows.select(pl.col("dataset").is_null().any()).item():
         raise ValueError("Some windows have no matching sample metadata.")
 
-    rows = add_eval_labels(rows, care_pd_labels=care_pd_labels)
+    if babel_raw_root is not None:
+        rows = attach_babel_labels(rows, raw_root=babel_raw_root)
+    else:
+        rows = add_eval_labels(rows, care_pd_labels=care_pd_labels)
 
     if dataset is not None:
         rows = rows.filter(pl.col("dataset") == dataset)

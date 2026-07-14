@@ -4,6 +4,8 @@ import torch.nn as nn
 
 from omegaconf import DictConfig
 
+from motion_jepa.utils import CHANNELS
+
 class TokenizeGroups(nn.Module):
     def __init__(self, config: DictConfig):
         super().__init__()
@@ -53,7 +55,18 @@ class TokenizeSegments(nn.Module):
         segment_count = T // self.segment_size
         x = x.reshape(B, segment_count, self.segment_size, D, C)
         return x
-    
+
+
+@t.no_grad()
+def compute_motion_intensity(x: t.Tensor, tokenize_t: TokenizeSegments, tokenize_g: TokenizeGroups, channel: str = "vel") -> t.Tensor:
+    """ (B, T, D, C) -> (B, segment_count, group_count) sum-of-|vel| per token """
+    velocity = x[..., CHANNELS.index(channel)].unsqueeze(-1)
+    velocity_groups: dict[str, t.Tensor] = tokenize_g(tokenize_t(velocity))
+    return t.stack([
+        group.abs().sum(dim=(2, 3, 4)) for group in velocity_groups.values()
+    ], dim=2)
+
+
 class TokenEmbed(nn.Module):
     def __init__(self, config: DictConfig):
         super().__init__()

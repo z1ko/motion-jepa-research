@@ -5,6 +5,8 @@ from __future__ import annotations
 import warnings
 
 import numpy as np
+import torch as t
+import torch.nn as nn
 from sklearn.exceptions import ConvergenceWarning
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, balanced_accuracy_score, f1_score
@@ -240,6 +242,116 @@ def run_linear_probe(
     }
 
 # ================================================================================================================
+# ATTENTIVE PROBE
+# ================================================================================================================
+
+class AttentiveProbeHead(nn.Module):
+    """A learned query cross-attends over every token before the linear classifier,
+    instead of a fixed mean/max pool -- tests whether pre-pooling (compute_embeddings)
+    is throwing away signal the encoder actually has (see CARE-PD-REPORT.md). Trained
+    fresh per LOSO fold, same as the linear/kNN/MLP probes below, so it never sees the
+    held-out subject's labels.
+    """
+
+    def __init__(self, embed_dim: int, n_classes: int, n_heads: int):
+        super().__init__()
+        self.query = nn.Parameter(t.randn(1, 1, embed_dim) * embed_dim**-0.5)
+        self.attn = nn.MultiheadAttention(embed_dim, n_heads, batch_first=True)
+        self.norm = nn.LayerNorm(embed_dim)
+        self.classifier = nn.Linear(embed_dim, n_classes)
+
+    def forward(self, tokens: t.Tensor, key_padding_mask: t.Tensor) -> t.Tensor:
+        query = self.query.expand(tokens.shape[0], -1, -1)
+        pooled, _ = self.attn(query, tokens, tokens, key_padding_mask=key_padding_mask)
+        return self.classifier(self.norm(pooled.squeeze(1)))
+
+
+def run_attentive_probe(
+    *,
+    tokens: np.ndarray,
+    valid_mask: np.ndarray,
+    labels: np.ndarray,
+    groups: np.ndarray,
+    walk_ids: np.ndarray,
+    n_heads: int = 4,
+    epochs: int = 100,
+    lr: float = 1e-3,
+    weight_decay: float = 1e-2,
+    device: t.device | None = None,
+    fold_indices: list[tuple[np.ndarray, np.ndarray]] | None = None,
+) -> dict:
+    """Same leave-one-subject-out protocol as run_linear_probe, but the probe is an
+    AttentiveProbeHead trained by gradient descent on the encoder's raw per-token
+    output (`tokens`, `valid_mask` from encoder.compute_token_embeddings) instead of
+    a scikit-learn classifier on a pre-pooled vector.
+    """
+    device = device or t.device("cuda" if t.cuda.is_available() else "cpu")
+    label_encoder = LabelEncoder()
+    y = label_encoder.fit_transform(labels)
+    n_classes = len(label_encoder.classes_)
+
+    if fold_indices is None:
+        fold_indices = list(LeaveOneGroupOut().split(tokens, y, groups=groups))
+
+    tokens_t = t.as_tensor(tokens, dtype=t.float32)
+    key_padding_mask_all = ~t.as_tensor(valid_mask, dtype=t.bool)  # True = ignore, matches nn.MultiheadAttention convention
+    y_t = t.as_tensor(y, dtype=t.long)
+
+    accuracies, walk_accuracies = [], []
+    y_test_all, y_pred_all, walk_y_test_all, walk_y_pred_all = [], [], [], []
+
+    for train_idx, test_idx in fold_indices:
+        y_train = y[train_idx]
+        if len(np.unique(y_train)) < 2:
+            continue
+
+        x_train = tokens_t[train_idx].to(device)
+        mask_train = key_padding_mask_all[train_idx].to(device)
+        y_train_t = y_t[train_idx].to(device)
+        x_test = tokens_t[test_idx].to(device)
+        mask_test = key_padding_mask_all[test_idx].to(device)
+
+        head = AttentiveProbeHead(embed_dim=tokens.shape[-1], n_classes=n_classes, n_heads=n_heads).to(device)
+        optimizer = t.optim.AdamW(head.parameters(), lr=lr, weight_decay=weight_decay)
+
+        head.train()
+        for _ in range(epochs):
+            optimizer.zero_grad()
+            logits = head(x_train, mask_train)
+            loss = nn.functional.cross_entropy(logits, y_train_t)
+            loss.backward()
+            optimizer.step()
+
+        head.eval()
+        with t.no_grad():
+            y_pred = head(x_test, mask_test).argmax(dim=-1).cpu().numpy()
+        y_test = y[test_idx]
+
+        accuracies.append(accuracy_score(y_test, y_pred))
+        y_test_all.append(y_test)
+        y_pred_all.append(y_pred)
+
+        test_walks = walk_ids[test_idx]
+        unique_walks, walk_inverse = np.unique(test_walks, return_inverse=True)
+        walk_true = np.array([y_test[walk_inverse == i][0] for i in range(len(unique_walks))])
+        walk_pred = np.array([np.bincount(y_pred[walk_inverse == i]).argmax() for i in range(len(unique_walks))])
+        walk_accuracies.append(accuracy_score(walk_true, walk_pred))
+        walk_y_test_all.append(walk_true)
+        walk_y_pred_all.append(walk_pred)
+
+    if not y_test_all:
+        raise ValueError("No valid leave-one-subject-out folds (need >=2 subjects with overlapping labels).")
+
+    pooled_labels = np.arange(n_classes)
+    return {
+        "n_folds": len(y_test_all),
+        "accuracy_mean": float(np.mean(accuracies)),
+        "f1_macro": float(f1_score(np.concatenate(y_test_all), np.concatenate(y_pred_all), labels=pooled_labels, average="macro", zero_division=0)),
+        "walk_accuracy_mean": float(np.mean(walk_accuracies)),
+        "walk_f1_macro": float(f1_score(np.concatenate(walk_y_test_all), np.concatenate(walk_y_pred_all), labels=pooled_labels, average="macro", zero_division=0)),
+    }
+
+# ================================================================================================================
 # REPORTING
 # ================================================================================================================
 
@@ -329,4 +441,24 @@ def print_report(results: list[dict], run_info: dict) -> None:
             "so no added overfitting risk, but privileges peak/salient tokens over the\n"
             "sustained average rather than detecting a rectified 'feature present' signal\n"
             "the way max-pooling does over ReLU activations in the GNN literature."
+        )
+
+    attentive_results = [r for r in results if "attentive" in r]
+    if attentive_results:
+        print()
+        print("Attentive probe: learned-query attention pool vs. fixed mean-pool (walk-level)")
+        print("=" * 78)
+        header = f"{'dataset':<12} {'mean.walk_f1':>13} {'attn.walk_f1':>13} {'delta':>8}"
+        print(header)
+        print("-" * len(header))
+        for r in attentive_results:
+            a = r["attentive"]
+            delta = a["walk_f1_macro"] - r["walk_f1_macro"]
+            print(f"{r['dataset']:<12} {r['walk_f1_macro']:>12.1%} {a['walk_f1_macro']:>12.1%} {delta:>+7.1%}")
+        print("=" * 78)
+        print(
+            "attn.* trains a learned query to cross-attend over every token (no fixed\n"
+            "pooling rule) before a linear classifier, fresh per LOSO fold -- tests whether\n"
+            "mean-pooling specifically was discarding signal the encoder has. A delta near\n"
+            "zero means pooling wasn't the bottleneck; a large positive delta means it was."
         )

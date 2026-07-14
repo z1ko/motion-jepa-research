@@ -10,7 +10,10 @@ from matplotlib.patches import Patch, Rectangle
 
 from omegaconf import OmegaConf
 
+from motion_jepa.architecture.components import TokenizeGroups, TokenizeSegments, compute_motion_intensity
+from motion_jepa.loader import MotionWindowDataset
 from motion_jepa.masking import (
+    mask_mamp,
     mask_mixed,
     mask_random,
     mask_spatial_blocks,
@@ -43,7 +46,10 @@ def build_token_valid(
 
 
 def draw_many(
-    fn, n_draws: int, *args, token_valid_ref: t.Tensor | None, **kwargs,
+    fn, n_draws: int, *args,
+    token_valid_ref: t.Tensor | None,
+    motion_intensity_ref: t.Tensor | None = None,
+    **kwargs,
 ) -> tuple[list[t.Tensor], list[dict]]:
     """Call fn n_draws times, each treating its OWN single sample (cycled
     from token_valid_ref) as if it were the whole batch for that step -- so
@@ -54,12 +60,24 @@ def draw_many(
     per-draw flat target-index tensors, deliberately NOT stacked into one
     tensor -- mask_mixed's draws can pick strategies with different target
     counts (e.g. tube vs. temporal), so the result is ragged in general.
+
+    motion_intensity_ref (mask_mamp only): cycled the same way as
+    token_valid_ref, injected as a `motion_intensity=` keyword -- callers
+    must pass every other fn-specific arg (fractions, temperature) as a
+    keyword too (via **kwargs), not positionally, since mask_mamp's
+    positional slot right after `device` is `motion_intensity` itself,
+    which this function fills in per-draw and can't come from a static
+    caller-supplied *args tuple.
     """
     ref_batch = token_valid_ref.shape[0] if token_valid_ref is not None else 1
+    mi_batch = motion_intensity_ref.shape[0] if motion_intensity_ref is not None else 1
     targets_list, metas = [], []
     for i in range(n_draws):
         tv = token_valid_ref[i % ref_batch : i % ref_batch + 1] if token_valid_ref is not None else None
-        mask, meta = fn(1, *args, token_valid=tv, return_meta=True, **kwargs)
+        call_kwargs = dict(kwargs)
+        if motion_intensity_ref is not None:
+            call_kwargs["motion_intensity"] = motion_intensity_ref[i % mi_batch : i % mi_batch + 1]
+        mask, meta = fn(1, *args, token_valid=tv, return_meta=True, **call_kwargs)
         targets_list.append(mask.targets[0])
         metas.append(meta[0])  # return_meta now returns a list of B per-sample dicts
     return targets_list, metas
@@ -156,11 +174,13 @@ def main() -> None:
             "simulates a mix of trial lengths across steps. All >= 1.0 disables padding."
         ),
     )
-    parser.add_argument("--temporal-block-segments", type=int, default=3)
-    parser.add_argument("--spatial-block-groups", type=int, default=2, help="Number of whole kinematic chains (of 5).")
-    parser.add_argument("--tube-block-segments", type=int, default=6)
-    parser.add_argument("--tube-block-groups", type=int, default=2, help="Number of whole kinematic chains (of 5).")
-    parser.add_argument("--random-n-targets", type=int, default=20)
+    parser.add_argument("--temporal-block-fraction", type=float, default=0.60, help="Fraction of valid_segments per block.")
+    parser.add_argument("--spatial-group-fraction", type=float, default=0.6, help="Fraction of the 5 kinematic chains.")
+    parser.add_argument("--tube-block-fraction", type=float, default=0.7, help="Fraction of valid_segments per block.")
+    parser.add_argument("--tube-group-fraction", type=float, default=0.6, help="Fraction of the 5 kinematic chains.")
+    parser.add_argument("--random-target-fraction", type=float, default=0.6, help="Fraction of valid tokens.")
+    parser.add_argument("--mamp-target-fraction", type=float, default=0.6, help="Fraction of valid tokens.")
+    parser.add_argument("--mamp-temperature", type=float, default=1.0, help="Gumbel-top-k sharpness (mask_mamp).")
     parser.add_argument("--seed", type=int, default=None, help="Fixed seed for reproducible draws. Default: random.")
     parser.add_argument("--out-dir", type=Path, default=Path("statistics/masks"))
     args = parser.parse_args()
@@ -189,33 +209,52 @@ def main() -> None:
     else:
         valid_segments_ex = [segment_count] * args.n_samples
 
+    # mask_mamp needs real (non-uniform) motion data -- synthetic/uniform x
+    # would make motion intensity uniform too, defeating the point of
+    # visualizing where it concentrates. Cycled by modulo like token_valid_ref
+    # if the val split has fewer windows than needed.
+    window_dataset = MotionWindowDataset(
+        root=config.data.root, window_size=config.data.window_size,
+        segment_size=config.architecture.segment_size, split="val",
+    )
+    tokenize_t = TokenizeSegments(config)
+    tokenize_g = TokenizeGroups(config)
+    n_real = max(args.n_samples, args.freq_draws)
+    x_real = t.stack([window_dataset[i % len(window_dataset)]["x"] for i in range(n_real)])
+    motion_intensity_real = compute_motion_intensity(x_real, tokenize_t, tokenize_g)
+
     # Each row: independent example draws (MaskIndices + per-draw meta for
     # the outline/title) plus a many-draw target-frequency grid.
     rows = []
 
     strategies = (
-        ("random", mask_random, {"n_targets": args.random_n_targets}),
-        ("temporal_blocks", mask_temporal_blocks, {"block_segments": args.temporal_block_segments}),
-        ("spatial_blocks", mask_spatial_blocks, {"block_groups": args.spatial_block_groups}),
-        ("tube_blocks", mask_tube_blocks, {"block_segments": args.tube_block_segments, "block_groups": args.tube_block_groups}),
+        ("random", mask_random, {"target_fraction": args.random_target_fraction}, None),
+        ("temporal_blocks", mask_temporal_blocks, {"block_fraction": args.temporal_block_fraction}, None),
+        ("spatial_blocks", mask_spatial_blocks, {"group_fraction": args.spatial_group_fraction}, None),
+        ("tube_blocks", mask_tube_blocks, {"block_fraction": args.tube_block_fraction, "group_fraction": args.tube_group_fraction}, None),
+        ("mamp", mask_mamp, {"target_fraction": args.mamp_target_fraction, "temperature": args.mamp_temperature}, motion_intensity_real),
     )
-    for name, fn, kwargs in strategies:
-        ex, ex_metas = draw_many(fn, args.n_samples, segment_count, group_count, device, *kwargs.values(), token_valid_ref=token_valid_ex)
-        freq_targets, _ = draw_many(fn, args.freq_draws, segment_count, group_count, device, *kwargs.values(), token_valid_ref=token_valid_ex)
+    for name, fn, kwargs, motion_intensity_ref in strategies:
+        mi_ex = motion_intensity_ref[:args.n_samples] if motion_intensity_ref is not None else None
+        ex, ex_metas = draw_many(fn, args.n_samples, segment_count, group_count, device, token_valid_ref=token_valid_ex, motion_intensity_ref=mi_ex, **kwargs)
+        freq_targets, _ = draw_many(fn, args.freq_draws, segment_count, group_count, device, token_valid_ref=token_valid_ex, motion_intensity_ref=motion_intensity_ref, **kwargs)
         rows.append({
             "name": name, "targets": ex, "metas": ex_metas, "strategies": [name] * args.n_samples,
             "freq": target_frequency(freq_targets, segment_count=segment_count, group_count=group_count, token_valid=token_valid_freq),
         })
 
     mixed_kwargs = dict(
-        temporal_block_segments=args.temporal_block_segments,
-        spatial_block_groups=args.spatial_block_groups,
-        tube_block_segments=args.tube_block_segments,
-        tube_block_groups=args.tube_block_groups,
-        random_n_targets=args.random_n_targets,
+        temporal_block_fraction=args.temporal_block_fraction,
+        spatial_group_fraction=args.spatial_group_fraction,
+        tube_block_fraction=args.tube_block_fraction,
+        tube_group_fraction=args.tube_group_fraction,
+        random_target_fraction=args.random_target_fraction,
+        mamp_target_fraction=args.mamp_target_fraction,
+        mamp_temperature=args.mamp_temperature,
     )
-    ex, ex_metas = draw_many(mask_mixed, args.n_samples, segment_count, group_count, device, token_valid_ref=token_valid_ex, **mixed_kwargs)
-    freq_targets, _ = draw_many(mask_mixed, args.freq_draws, segment_count, group_count, device, token_valid_ref=token_valid_ex, **mixed_kwargs)
+    mi_ex = motion_intensity_real[:args.n_samples]
+    ex, ex_metas = draw_many(mask_mixed, args.n_samples, segment_count, group_count, device, token_valid_ref=token_valid_ex, motion_intensity_ref=mi_ex, **mixed_kwargs)
+    freq_targets, _ = draw_many(mask_mixed, args.freq_draws, segment_count, group_count, device, token_valid_ref=token_valid_ex, motion_intensity_ref=motion_intensity_real, **mixed_kwargs)
     rows.append({
         "name": "mixed", "targets": ex, "metas": ex_metas, "strategies": [m["strategy"] for m in ex_metas],
         "freq": target_frequency(freq_targets, segment_count=segment_count, group_count=group_count, token_valid=token_valid_freq),

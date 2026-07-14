@@ -4,10 +4,12 @@ from pathlib import Path
 
 from motion_jepa.preprocess import create_raw_motion_dataset, generate_splits_and_windows
 
-# Only these two sub-cohorts have CARE-PD's OpenSim-style CSVs available today
-# (DNE has no MDS-UPDRS-gait label -- FoG only, see papers/CarePD.pdf Table 1;
-# PD-GaM/T-SDU-PD were never converted to this CSV format).
-_COHORTS = ("3DGait", "BMCLab")
+# Only these sub-cohorts have both OpenSim-style CSVs AND an MDS-UPDRS-gait
+# label (see papers/CarePD.pdf Table 1). DNE/E-LC/KUL-DT-T have CSVs now too
+# but no gait-severity label in carepd_mds_updrs_gait_severity.csv (FoG-only
+# cohorts) -- excluded for the same reason DNE always was. T-SDU-PD still has
+# no CSVs at all.
+_COHORTS = ("3DGait", "BMCLab", "PD-GaM")
 
 
 def build_tree(*, samples_dir: Path, tree_dir: Path) -> None:

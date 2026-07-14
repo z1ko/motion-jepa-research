@@ -35,8 +35,8 @@ from motion_jepa.evaluation.data import (
     load_fixed_folds,
     load_window_table,
 )
-from motion_jepa.evaluation.encoder import compute_embeddings, load_encoder, read_checkpoint_provenance
-from motion_jepa.evaluation.probes import print_report, run_linear_probe
+from motion_jepa.evaluation.encoder import compute_embeddings, compute_token_embeddings, load_encoder, read_checkpoint_provenance
+from motion_jepa.evaluation.probes import print_report, run_attentive_probe, run_linear_probe
 
 DEFAULT_DATASETS = ["SOMA", "HumanEva", "DanceDB"]
 
@@ -82,6 +82,19 @@ def parse_args() -> argparse.Namespace:
             "whether mean-pooling is washing out localized or peak signal."
         ),
     )
+    parser.add_argument(
+        "--attentive-probe",
+        action="store_true",
+        help=(
+            "Also probe with a learned-query attention pool (AttentiveProbeHead) trained "
+            "per fold on the encoder's unpooled per-token output, instead of a fixed mean/"
+            "max pool -- tests whether pre-pooling is throwing away signal (see CARE-PD-REPORT.md)."
+        ),
+    )
+    parser.add_argument("--attentive-epochs", default=100, type=int)
+    parser.add_argument("--attentive-lr", default=1e-3, type=float)
+    parser.add_argument("--attentive-weight-decay", default=1e-2, type=float)
+    parser.add_argument("--attentive-heads", default=4, type=int)
     parser.add_argument("--out", default=None, type=Path, help="Optional path to write full results as JSON.")
     parser.add_argument(
         "--care-pd-labels", default=Path("data/raw/care_pd/carepd_mds_updrs_gait_severity.csv"), type=Path,
@@ -94,6 +107,17 @@ def parse_args() -> argparse.Namespace:
             "reproduces the paper's own fold assignment instead of our LeaveOneGroupOut. "
             "Applies to every CARE-PD dataset in --datasets, so evaluate one CARE-PD cohort "
             "per invocation when using this (different cohorts have different fold files)."
+        ),
+    )
+    parser.add_argument(
+        "--babel-raw-root", default=None, type=Path,
+        help=(
+            "If set, attach BABEL frame-level action labels read from raw AMASS CSVs under "
+            "this root (e.g. data/raw/amass) instead of filename/CARE-PD label parsing -- for "
+            "datasets like ACCAD/MoSh/SFU with no filename-encoded label of their own (see "
+            "config/datasets_babel.yaml). Use with --split train, since these datasets are "
+            "still config/datasets.yaml's pretrain_train -- see CARE-PD-REPORT.md's caveat on "
+            "evaluating labels for motion the encoder has already seen unlabeled."
         ),
     )
     return parser.parse_args()
@@ -128,12 +152,18 @@ def evaluate_dataset(
     probe_mlp_hidden: int,
     probe_mlp_max_iter: int,
     compare_pooling: bool = False,
+    attentive_probe: bool = False,
+    attentive_epochs: int = 100,
+    attentive_lr: float = 1e-3,
+    attentive_weight_decay: float = 1e-2,
+    attentive_heads: int = 4,
     care_pd_labels: dict[str, int] | None = None,
     care_pd_fold_file: Path | None = None,
+    babel_raw_root: Path | None = None,
 ) -> dict | None:
     rows = load_window_table(
         root=root, split=split, dataset=dataset_name, max_windows=max_windows, seed=seed,
-        care_pd_labels=care_pd_labels,
+        care_pd_labels=care_pd_labels, babel_raw_root=babel_raw_root,
     )
     rows = filter_labeled_rows(rows, min_label_subjects=min_label_subjects)
 
@@ -225,6 +255,25 @@ def evaluate_dataset(
                 fold_indices=fold_indices,
             )
 
+    if attentive_probe:
+        tokens, valid_mask = compute_token_embeddings(
+            encoder=encoder, dataset=window_dataset, batch_size=batch_size, device=device,
+            segment_count=segment_count, group_count=group_count,
+        )
+        result["attentive"] = run_attentive_probe(
+            tokens=tokens,
+            valid_mask=valid_mask,
+            labels=labels,
+            groups=groups,
+            walk_ids=walk_ids,
+            n_heads=attentive_heads,
+            epochs=attentive_epochs,
+            lr=attentive_lr,
+            weight_decay=attentive_weight_decay,
+            device=device,
+            fold_indices=fold_indices,
+        )
+
     return result
 
 # ================================================================================================================
@@ -262,8 +311,14 @@ def main() -> None:
             probe_mlp_hidden=args.probe_mlp_hidden,
             probe_mlp_max_iter=args.probe_mlp_max_iter,
             compare_pooling=args.compare_pooling,
+            attentive_probe=args.attentive_probe,
+            attentive_epochs=args.attentive_epochs,
+            attentive_lr=args.attentive_lr,
+            attentive_weight_decay=args.attentive_weight_decay,
+            attentive_heads=args.attentive_heads,
             care_pd_labels=care_pd_labels,
             care_pd_fold_file=args.care_pd_fold_file,
+            babel_raw_root=args.babel_raw_root,
         )
         if result is not None:
             results.append(result)

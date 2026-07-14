@@ -6,9 +6,9 @@ import torch.nn as nn
 
 from omegaconf import DictConfig
 
-from motion_jepa.architecture.components import TokenEmbed, _encoder
+from motion_jepa.architecture.components import TokenEmbed, TokenizeGroups, TokenizeSegments, _encoder, compute_motion_intensity
 from motion_jepa.architecture.positional import PositionalEncoding
-from motion_jepa.masking import MaskIndices, mask_mixed
+from motion_jepa.masking import MaskIndices, mask_mamp
 
 class MotionEncoder(nn.Module):
     def __init__(self, config: DictConfig):
@@ -142,6 +142,12 @@ class MotionJEPA(nn.Module):
         self.segment_count = config.data.window_size // config.architecture.segment_size
         self.group_count = len(config.training.groups)
 
+        # Dedicated instances for compute_motion_intensity (masking.py's "mamp"
+        # strategy) -- decoupled from student_encoder.embed's own tokenizers so
+        # this stays reusable (e.g. scripts/viz_masks.py) without needing a full model.
+        self._motion_tokenize_t = TokenizeSegments(config)
+        self._motion_tokenize_g = TokenizeGroups(config)
+
         self.student_encoder = MotionEncoder(config)
         self.teacher_encoder = deepcopy(self.student_encoder)
         self._freeze_teacher_encoder()
@@ -180,13 +186,19 @@ class MotionJEPA(nn.Module):
         token_valid = segment_valid.unsqueeze(-1).expand(-1, -1, self.group_count)  # (B, S, G), matches masking.py's scores shape
         key_padding_mask = ~token_valid.flatten(1, 2)  # (B, S*G), matches the flattened token axis used for gather/attention
 
-        # Generate random masks if not provided
+        # Generate random masks if not provided. mask_mamp only, for now
+        # (ablation: train with MAMP-style motion-aware masking exclusively,
+        # not blended with the other 4 strategies via mask_mixed).
         if masks is None:
-            masks = mask_mixed(
+            motion_intensity = compute_motion_intensity(x, self._motion_tokenize_t, self._motion_tokenize_g)
+            masks = mask_mamp(
                 batch_size=batch_size,
                 segment_count=self.segment_count,
                 group_count=self.group_count,
                 device=x.device,
+                motion_intensity=motion_intensity,
+                target_fraction=0.9,
+                temperature=1.5,
                 token_valid=token_valid,
             )
 

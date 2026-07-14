@@ -65,6 +65,44 @@ def read_checkpoint_provenance(checkpoint: Path, config) -> dict:
 # ================================================================================================================
 
 @t.inference_mode()
+def compute_token_embeddings(
+    *,
+    encoder: t.nn.Module,
+    dataset: Dataset,
+    batch_size: int,
+    device: t.device,
+    segment_count: int,
+    group_count: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Per-window token embeddings, unpooled: (N, segment_count*group_count, D) plus
+    a (N, segment_count*group_count) valid-token mask. Feeds the attentive probe
+    (probes.run_attentive_probe) -- unlike compute_embeddings' mean/max/per_group/
+    per_segment pooling, this keeps every token so the probe's own learned attention
+    query decides what to keep, instead of a fixed pooling rule deciding upfront.
+    """
+    loader = DataLoader(
+        dataset, batch_size=batch_size, shuffle=False, num_workers=0, pin_memory=(device.type == "cuda"),
+    )
+
+    token_chunks: list[np.ndarray] = []
+    mask_chunks: list[np.ndarray] = []
+    for batch in loader:
+        x = batch["x"].to(device, non_blocking=True)
+        valid_segments = batch["valid_segments"].to(device, non_blocking=True)
+
+        segment_valid = t.arange(segment_count, device=device).unsqueeze(0) < valid_segments.unsqueeze(1)
+        token_valid = segment_valid.unsqueeze(-1).expand(-1, -1, group_count).flatten(1, 2)  # (B, segment_count * group_count)
+        key_padding_mask = ~token_valid
+
+        tokens = encoder(x, idx=None, key_padding_mask=key_padding_mask)  # (B, segment_count * group_count, D)
+
+        token_chunks.append(tokens.cpu().numpy())
+        mask_chunks.append(token_valid.cpu().numpy())
+
+    return np.concatenate(token_chunks, axis=0), np.concatenate(mask_chunks, axis=0)
+
+
+@t.inference_mode()
 def compute_embeddings(
     *,
     encoder: t.nn.Module,
