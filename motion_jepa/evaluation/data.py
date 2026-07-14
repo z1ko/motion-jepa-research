@@ -177,6 +177,52 @@ def load_window_table(
 
     return rows
 
+
+def load_pooled_window_table(
+    *,
+    root: Path | str,
+    split: str,
+    window_size: int,
+    stride: int,
+    min_valid_frames: int,
+    datasets: list[str],
+    max_windows: int | None = None,
+    seed: int = 42,
+    care_pd_labels: dict[str, int] | None = None,
+    babel_raw_root: Path | str | None = None,
+) -> pl.DataFrame:
+    """Concatenate load_window_table(...) per dataset in `datasets` into one
+    combined table -- e.g. pooling ACCAD+MoSh+SFU into a single LOSO
+    evaluation instead of three separate weak ones (see cli.py's
+    _DATASET_GROUPS). `max_windows` subsampling (if any) applies once, to
+    the pooled table, not per member dataset.
+    """
+    tables = [
+        load_window_table(
+            root=root, split=split, dataset=name, window_size=window_size, stride=stride,
+            min_valid_frames=min_valid_frames, care_pd_labels=care_pd_labels, babel_raw_root=babel_raw_root,
+        )
+        for name in datasets
+    ]
+    rows = pl.concat(tables, how="vertical")
+
+    if len(datasets) > 1:
+        # Qualify the LOSO group key by dataset when pooling -- subject ids
+        # are free text per source dataset (ACCAD/MoSh/SFU happen not to
+        # collide today, checked directly against samples.parquet, but
+        # nothing enforces that going forward). A single-dataset call (the
+        # existing, unpooled path) needs no qualifying, so this leaves
+        # --datasets ACCAD (etc.) byte-for-byte unchanged.
+        rows = rows.with_columns((pl.col("dataset") + ":" + pl.col("subject")).alias("subject"))
+
+    if max_windows is not None:
+        if max_windows <= 0:
+            raise ValueError("--max-windows must be positive.")
+        if rows.height > max_windows:
+            rows = rows.sample(n=max_windows, seed=seed, shuffle=True)
+
+    return rows
+
 # ================================================================================================================
 # LABEL FILTERING
 # ================================================================================================================

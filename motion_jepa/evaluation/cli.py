@@ -7,14 +7,17 @@ carries -- the standard linear-probe protocol for self-supervised encoders.
 
 Evaluated on the current `validation` split (see config/datasets_babel.yaml):
 HumanEva (action, parsed from the trial filename by
-`motion_jepa.evaluation.data.parse_eval_label`) and ACCAD/MoSh/SFU (action,
-parsed from BABEL frame-level labels in the raw AMASS CSVs, since those three
-have no filename-encoded label of their own -- see `_BABEL_DATASETS` below
-and `motion_jepa.evaluation.babel`). SOMA/DanceDB were dropped from this
-default set: too few subjects (2-3) for a reliable instrument, and DanceDB's
-label (emotion) is a different semantic task than the others (see
-CARE-PD-REPORT.md and the conversation that led here). This is the suite
-used to score model checkpoints after training.
+`motion_jepa.evaluation.data.parse_eval_label`) and the pooled pseudo-dataset
+`BABEL` (ACCAD+MoSh+SFU concatenated into one combined LOSO evaluation --
+see `_DATASET_GROUPS`/`load_pooled_window_table` -- with action labels
+parsed from BABEL frame-level tags in the raw AMASS CSVs and collapsed to a
+coarse taxonomy, see `motion_jepa.evaluation.babel`). ACCAD/MoSh/SFU
+individually have too few subjects (16/16/7) for a reliable instrument on
+their own; pooling gives ~39 subjects/folds to one probe instead. SOMA/
+DanceDB were dropped from this default set entirely: too few subjects (2-3),
+and DanceDB's label (emotion) is a different semantic task than the others
+(see CARE-PD-REPORT.md and the conversation that led here). This is the
+suite used to score model checkpoints after training.
 
 Cross-validation is leave-one-subject-out (grouped by subject, never by
 window), since:
@@ -34,23 +37,33 @@ from pathlib import Path
 
 import torch as t
 
+from motion_jepa.architecture.model import MotionJEPA
 from motion_jepa.evaluation.data import (
     WindowRowsDataset,
     filter_labeled_rows,
     load_care_pd_labels,
     load_fixed_folds,
-    load_window_table,
+    load_pooled_window_table,
 )
 from motion_jepa.evaluation.encoder import compute_embeddings, compute_token_embeddings, load_encoder, read_checkpoint_provenance
 from motion_jepa.evaluation.probes import print_report, run_attentive_probe, run_dmu_probe, run_linear_probe
+from motion_jepa.evaluation.results_table import flatten_result, upsert_results_table
 
-DEFAULT_DATASETS = ["HumanEva", "ACCAD", "MoSh", "SFU"]
+DEFAULT_DATASETS = ["HumanEva", "BABEL"]
 
 # These have no filename-encoded label of their own (see parse_eval_label) --
 # routed through BABEL frame-level labels (motion_jepa.evaluation.babel)
 # instead, automatically, regardless of what --babel-raw-root defaults to.
 # HumanEva keeps filename-based parsing.
 _BABEL_DATASETS = {"ACCAD", "MoSh", "SFU"}
+
+# Pseudo-dataset names that pool several real datasets into one combined
+# LOSO evaluation instead of reporting them separately. ACCAD (16 subj) /
+# MoSh (16) / SFU (7) individually produce noisy, sometimes-degenerate LOSO
+# folds (n_test as low as 2) -- pooling gives ~39 subjects/folds to one
+# probe. --datasets ACCAD (etc.) still works standalone, unpooled --
+# additive via _DATASET_GROUPS.get(name, [name]).
+_DATASET_GROUPS: dict[str, list[str]] = {"BABEL": sorted(_BABEL_DATASETS)}
 
 # ================================================================================================================
 # CLI
@@ -140,7 +153,31 @@ def parse_args() -> argparse.Namespace:
         "--dmu-reference-label", default=None, type=str,
         help="Reference ('unimpaired') class for the DMU score. Default: min label per fold.",
     )
+    parser.add_argument(
+        "--random-baseline",
+        action="store_true",
+        help=(
+            "Also run the identical probe on a freshly-constructed, untrained encoder of the "
+            "same architecture (same --seed), reported as a delta vs. the trained encoder. Some "
+            "datasets/labels turn out to be decodable from raw kinematic statistics alone, even "
+            "through an untrained transformer -- a delta near zero means this dataset can't "
+            "currently distinguish trained from random representations (see CARE-PD-REPORT.md)."
+        ),
+    )
     parser.add_argument("--out", default=None, type=Path, help="Optional path to write full results as JSON.")
+    parser.add_argument(
+        "--results-table", default=Path("runs/eval_results.parquet"), type=Path,
+        help=(
+            "Parquet file every invocation upserts a flattened row into (one row per "
+            "checkpoint x dataset x eval-window-settings), for cross-checkpoint queries "
+            "(hyperparameters + core metrics + random-baseline delta). See "
+            "motion_jepa.evaluation.results_table. Unaffected by --out, which still writes "
+            "the full-detail JSON (folds/dmu/attentive/pooling_comparison) separately."
+        ),
+    )
+    parser.add_argument(
+        "--no-results-table", action="store_true", help="Skip updating --results-table for this invocation.",
+    )
     parser.add_argument(
         "--care-pd-labels", default=Path("data/raw/care_pd/carepd_mds_updrs_gait_severity.csv"), type=Path,
         help="CARE-PD's filename;score MDS-UPDRS-gait table. Only read if a --datasets entry starts with 'CARE-PD-'.",
@@ -158,7 +195,8 @@ def parse_args() -> argparse.Namespace:
         "--babel-raw-root", default=Path("data/raw/amass"), type=Path,
         help=(
             "Root of raw AMASS CSVs, used to attach BABEL frame-level action labels for "
-            "datasets in _BABEL_DATASETS (ACCAD/MoSh/SFU) that have no filename-encoded label "
+            "datasets in _BABEL_DATASETS (ACCAD/MoSh/SFU, or the pooled 'BABEL' pseudo-dataset "
+            "that combines all three -- see _DATASET_GROUPS) that have no filename-encoded label "
             "of their own (see config/datasets_babel.yaml, motion_jepa.evaluation.babel). "
             "Applied automatically only to those datasets -- HumanEva and any other "
             "--datasets entry still use filename/CARE-PD label parsing regardless of this flag."
@@ -209,12 +247,17 @@ def evaluate_dataset(
     care_pd_labels: dict[str, int] | None = None,
     care_pd_fold_file: Path | None = None,
     babel_raw_root: Path | None = None,
+    random_encoder: t.nn.Module | None = None,
 ) -> dict | None:
-    rows = load_window_table(
-        root=root, split=split, dataset=dataset_name, max_windows=max_windows, seed=seed,
-        window_size=eval_window_size or config.data.window_size,
-        stride=eval_stride or config.data.stride,
-        min_valid_frames=eval_min_valid_frames or config.data.min_valid_frames,
+    group_members = _DATASET_GROUPS.get(dataset_name, [dataset_name])
+    resolved_window_size = eval_window_size or config.data.window_size
+    resolved_stride = eval_stride or config.data.stride
+    resolved_min_valid_frames = eval_min_valid_frames or config.data.min_valid_frames
+    rows = load_pooled_window_table(
+        root=root, split=split, datasets=group_members, max_windows=max_windows, seed=seed,
+        window_size=resolved_window_size,
+        stride=resolved_stride,
+        min_valid_frames=resolved_min_valid_frames,
         care_pd_labels=care_pd_labels, babel_raw_root=babel_raw_root,
     )
     rows = filter_labeled_rows(rows, min_label_subjects=min_label_subjects)
@@ -273,6 +316,11 @@ def evaluate_dataset(
         "label_kind": label_kind,
         "n_windows": rows.height,
         "n_subjects": n_subjects,
+        "root": str(root),
+        "split": split,
+        "eval_window_size": resolved_window_size,
+        "eval_stride": resolved_stride,
+        "eval_min_valid_frames": resolved_min_valid_frames,
     })
 
     if compare_pooling:
@@ -332,6 +380,29 @@ def evaluate_dataset(
             reference_label=dmu_reference_label, fold_indices=fold_indices,
         )
 
+    if random_encoder is not None:
+        random_embeddings = compute_embeddings(
+            encoder=random_encoder,
+            dataset=window_dataset,
+            batch_size=batch_size,
+            device=device,
+            segment_count=segment_count,
+            group_count=group_count,
+            pooling="mean",
+        )
+        result["random_baseline"] = run_linear_probe(
+            embeddings=random_embeddings,
+            labels=labels,
+            groups=groups,
+            walk_ids=walk_ids,
+            probe_c=probe_c,
+            probe_max_iter=probe_max_iter,
+            probe_knn_k=probe_knn_k,
+            probe_mlp_hidden=probe_mlp_hidden,
+            probe_mlp_max_iter=probe_mlp_max_iter,
+            fold_indices=fold_indices,
+        )
+
     return result
 
 # ================================================================================================================
@@ -350,8 +421,15 @@ def main() -> None:
     if any(name.startswith("CARE-PD-") for name in dataset_names):
         care_pd_labels = load_care_pd_labels(args.care_pd_labels)
 
+    random_encoder = None
+    if args.random_baseline:
+        t.manual_seed(args.seed)
+        random_encoder = MotionJEPA(config).teacher_encoder.to(device)
+        random_encoder.eval()
+
     results = []
     for dataset_name in dataset_names:
+        group_members = _DATASET_GROUPS.get(dataset_name, [dataset_name])
         result = evaluate_dataset(
             dataset_name=dataset_name,
             root=args.root,
@@ -381,7 +459,8 @@ def main() -> None:
             dmu_reference_label=args.dmu_reference_label,
             care_pd_labels=care_pd_labels,
             care_pd_fold_file=args.care_pd_fold_file,
-            babel_raw_root=args.babel_raw_root if dataset_name in _BABEL_DATASETS else None,
+            babel_raw_root=args.babel_raw_root if all(m in _BABEL_DATASETS for m in group_members) else None,
+            random_encoder=random_encoder,
         )
         if result is not None:
             results.append(result)
@@ -396,6 +475,12 @@ def main() -> None:
         with args.out.open("w") as f:
             json.dump({"run": run_info, "results": results}, f, indent=2)
         print(f"\nwrote: {args.out}")
+
+    if not args.no_results_table:
+        detail_json = str(args.out) if args.out is not None else None
+        rows = [flatten_result(run_info, r, detail_json=detail_json) for r in results]
+        upsert_results_table(rows, args.results_table)
+        print(f"updated: {args.results_table} ({len(rows)} row(s))")
 
 
 if __name__ == "__main__":

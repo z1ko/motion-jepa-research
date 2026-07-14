@@ -42,18 +42,66 @@ def _resampled_action_array(raw_root: str, dataset: str, subject: str, trial: st
     return tuple(sample.extra["action"].to_list())
 
 
+def _parse_tags(raw: str | None) -> list[str]:
+    """One frame's raw BABEL field -> every tag from every annotator.
+
+    BABEL's composite format: `;` separates independent annotators'
+    descriptions of the same frame, `|` separates co-occurring tags within
+    one annotator's own description (e.g. 'run|forward movement' = running
+    while moving forward). Both levels are flattened here with equal weight
+    -- every tag any annotator mentioned counts once toward the window's
+    majority vote, not just the first annotator's first tag (see the
+    conversation this fixes: 'label1|label2;label3' used to silently
+    collapse to just 'label1').
+    """
+    if not raw:
+        return []
+    tags = (tag.strip().lower() for segment in raw.split(";") for tag in segment.split("|"))
+    return [tag for tag in tags if tag not in _JUNK_ACTIONS]
+
+
+# Coarse action buckets, collapsed from BABEL's 36-tag fine vocabulary
+# (badly imbalanced/sparse once ACCAD+MoSh+SFU are pooled -- see cli.py's
+# _DATASET_GROUPS). Draft: adjust categories/membership freely; any fine
+# tag not listed here passes through _coarsen unchanged (see below).
+_COARSE_BABEL_CATEGORIES: dict[str, tuple[str, ...]] = {
+    "locomotion": ("walk", "run", "step", "turn", "forward movement", "sideways movement", "crawl", "hop"),
+    "jump_like": ("jump", "leap", "cartwheel"),
+    "static": ("stand", "lie", "poses", "stand up", "stances", "look"),
+    "manipulation": ("interact with/use object", "lift something", "grasp object", "touching body part"),
+    "body_part_movement": ("head movements", "arm movements", "hand movements", "knee movement", "raising body part"),
+    "sport_martial": ("martial art", "play sport", "kick", "exercise/training"),
+    "dance": ("dance",),
+    "other": ("stretch", "bend", "squat", "circular movement", "lean"),
+}
+_FINE_TO_COARSE: dict[str, str] = {
+    fine: coarse for coarse, fines in _COARSE_BABEL_CATEGORIES.items() for fine in fines
+}
+
+
+def _coarsen(tag: str) -> str:
+    """Fine BABEL tag -> coarse bucket. Unmapped tags pass through
+    unchanged as their own singleton class -- filter_labeled_rows's
+    min_label_subjects threshold already drops anything too rare on its
+    own, so nothing needs to raise or get a catch-all "unknown" label.
+    """
+    return _FINE_TO_COARSE.get(tag, tag)
+
+
 def babel_action_label(
     *, raw_root: Path | str, dataset: str, subject: str, trial: str, start: int, end: int, hz: float = 100.0,
 ) -> str | None:
-    """Majority-vote primary action tag (first '|'-segment of BABEL's
-    composite label, junk excluded) over one window's frame range. None if
-    every frame in range is junk or past the trial's resampled length.
+    """Majority-vote coarse action bucket over one window's frame range,
+    counting every tag from every annotator per frame (see `_parse_tags`),
+    mapped through `_coarsen` before voting so co-occurring/near tags that
+    land in the same bucket reinforce each other. None if every frame in
+    range is junk/unlabeled or past the trial's resampled length.
     """
     actions = _resampled_action_array(str(raw_root), dataset, subject, trial, hz)
     # Raw CSV empty fields read as null (polars), not "" -- e.g. frames
     # outside any BABEL-annotated segment.
-    primary = ((a or "").split("|", 1)[0].strip().lower() for a in actions[start:min(end, len(actions))])
-    counts = Counter(a for a in primary if a not in _JUNK_ACTIONS)
+    frames = actions[start:min(end, len(actions))]
+    counts = Counter(_coarsen(tag) for a in frames for tag in _parse_tags(a))
     return counts.most_common(1)[0][0] if counts else None
 
 

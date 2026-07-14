@@ -453,6 +453,13 @@ def print_report(results: list[dict], run_info: dict) -> None:
     print()
     print("Linear-probe results (leave-one-subject-out)")
     print(f"checkpoint: {run_info['checkpoint']} (epoch={run_info['epoch']}, step={run_info['global_step']})")
+    ran = [name for name, present in [
+        ("pooling_comparison", any("pooling_comparison" in r for r in results)),
+        ("attentive", any("attentive" in r for r in results)),
+        ("dmu", any("dmu" in r for r in results)),
+        ("random_baseline", any("random_baseline" in r for r in results)),
+    ] if present]
+    print(f"probes: {', '.join(ran) if ran else 'none'}")
     print("=" * 78)
     header = (
         f"{'dataset':<12} {'label':<8} {'windows':>8} {'classes':>8} {'folds':>6} "
@@ -471,18 +478,6 @@ def print_report(results: list[dict], run_info: dict) -> None:
             f"{r['chance_baseline']:>7.1%} {r['majority_baseline_mean']:>8.1%}"
         )
     print("=" * 78)
-    print(
-        "lin.* is held-out-subject logistic-regression accuracy; knn.* is the non-parametric\n"
-        "k-NN probe (k up to --probe-knn-k, clipped to the smallest training class); mlp.* is a\n"
-        "one-hidden-layer MLP probe (--probe-mlp-hidden units) -- a large mlp > lin gap means the\n"
-        "label is present but not linearly separable. *.f1 is macro-F1 pooled across all folds'\n"
-        "predictions (CARE-PD paper's own metric) -- per-fold macro-F1 would be capped at 1/3 on\n"
-        "folds whose held-out subject's labels happen to fall in one class, even for a perfect\n"
-        "prediction. chance = 1/n_classes;\n"
-        "majority = predicting the training fold's most common label.\n"
-        "n_folds == n_subjects (leave-one-subject-out) -- with only a handful of subjects "
-        "per dataset, treat these numbers as noisy point estimates, not precise scores."
-    )
 
     print()
     print("Walk-level (majority-vote) results -- matches CARE-PD paper's per-clip-predict,")
@@ -523,19 +518,6 @@ def print_report(results: list[dict], run_info: dict) -> None:
                 cells.append(f"{alt['accuracy_mean']:>6.1%} ({delta:>+5.1%})".rjust(col_width))
             print(f"{r['dataset']:<12} {r['accuracy_mean']:>7.1%} " + " ".join(cells))
         print("=" * 78)
-        print(
-            "per-group keeps each anatomical group's own time-pooled embedding separate\n"
-            "(tests whether pooling washes out signal localized to a few joints); per-segment\n"
-            "keeps each time segment's own across-body embedding separate (tests whether\n"
-            "pooling washes out signal localized to a part of the window, e.g. the motion's\n"
-            "onset). Both cost a group_count- or segment_count-times wider feature vector for\n"
-            "the same handful of training windows per fold, so treat a small positive delta\n"
-            "there as inconclusive and only a large, consistent one as real. max takes an\n"
-            "element-wise max over valid tokens instead of an average -- same width as mean,\n"
-            "so no added overfitting risk, but privileges peak/salient tokens over the\n"
-            "sustained average rather than detecting a rectified 'feature present' signal\n"
-            "the way max-pooling does over ReLU activations in the GNN literature."
-        )
 
     attentive_results = [r for r in results if "attentive" in r]
     if attentive_results:
@@ -550,12 +532,6 @@ def print_report(results: list[dict], run_info: dict) -> None:
             delta = a["walk_f1_macro"] - r["walk_f1_macro"]
             print(f"{r['dataset']:<12} {r['walk_f1_macro']:>12.1%} {a['walk_f1_macro']:>12.1%} {delta:>+7.1%}")
         print("=" * 78)
-        print(
-            "attn.* trains a learned query to cross-attend over every token (no fixed\n"
-            "pooling rule) before a linear classifier, fresh per LOSO fold -- tests whether\n"
-            "mean-pooling specifically was discarding signal the encoder has. A delta near\n"
-            "zero means pooling wasn't the bottleneck; a large positive delta means it was."
-        )
 
     dmu_results = [r for r in results if "dmu" in r]
     if dmu_results:
@@ -581,6 +557,64 @@ def print_report(results: list[dict], run_info: dict) -> None:
             )
             print(f"{r['dataset']:<12} per-class dmu mean+-std: {classes}")
         print("=" * 78)
+
+    random_results = [r for r in results if "random_baseline" in r]
+    if random_results:
+        print()
+        print("Random-init baseline: trained vs. untrained encoder, same probe (walk-level)")
+        print("=" * 78)
+        header = f"{'dataset':<12} {'trained.walk_f1':>15} {'random.walk_f1':>15} {'delta':>8}"
+        print(header)
+        print("-" * len(header))
+        for r in random_results:
+            rb = r["random_baseline"]
+            delta = r["walk_f1_macro"] - rb["walk_f1_macro"]
+            print(f"{r['dataset']:<12} {r['walk_f1_macro']:>14.1%} {rb['walk_f1_macro']:>14.1%} {delta:>+7.1%}")
+        print("=" * 78)
+
+    # Every table's full explanation, consolidated here instead of interleaved
+    # after each section -- same text as before, just not repeated once per
+    # section when several probe flags are active in one invocation.
+    print()
+    print("Metric definitions")
+    print("=" * 78)
+    print(
+        "lin.* is held-out-subject logistic-regression accuracy; knn.* is the non-parametric\n"
+        "k-NN probe (k up to --probe-knn-k, clipped to the smallest training class); mlp.* is a\n"
+        "one-hidden-layer MLP probe (--probe-mlp-hidden units) -- a large mlp > lin gap means the\n"
+        "label is present but not linearly separable. *.f1 is macro-F1 pooled across all folds'\n"
+        "predictions (CARE-PD paper's own metric) -- per-fold macro-F1 would be capped at 1/3 on\n"
+        "folds whose held-out subject's labels happen to fall in one class, even for a perfect\n"
+        "prediction. chance = 1/n_classes;\n"
+        "majority = predicting the training fold's most common label.\n"
+        "n_folds == n_subjects (leave-one-subject-out) -- with only a handful of subjects "
+        "per dataset, treat these numbers as noisy point estimates, not precise scores."
+    )
+    if pooling_results:
+        print()
+        print(
+            "per-group keeps each anatomical group's own time-pooled embedding separate\n"
+            "(tests whether pooling washes out signal localized to a few joints); per-segment\n"
+            "keeps each time segment's own across-body embedding separate (tests whether\n"
+            "pooling washes out signal localized to a part of the window, e.g. the motion's\n"
+            "onset). Both cost a group_count- or segment_count-times wider feature vector for\n"
+            "the same handful of training windows per fold, so treat a small positive delta\n"
+            "there as inconclusive and only a large, consistent one as real. max takes an\n"
+            "element-wise max over valid tokens instead of an average -- same width as mean,\n"
+            "so no added overfitting risk, but privileges peak/salient tokens over the\n"
+            "sustained average rather than detecting a rectified 'feature present' signal\n"
+            "the way max-pooling does over ReLU activations in the GNN literature."
+        )
+    if attentive_results:
+        print()
+        print(
+            "attn.* trains a learned query to cross-attend over every token (no fixed\n"
+            "pooling rule) before a linear classifier, fresh per LOSO fold -- tests whether\n"
+            "mean-pooling specifically was discarding signal the encoder has. A delta near\n"
+            "zero means pooling wasn't the bottleneck; a large positive delta means it was."
+        )
+    if dmu_results:
+        print()
         print(
             "dmu is a per-window diagonal-Mahalanobis distance from the reference class's\n"
             "mean/variance (refit per LOSO fold, train split only) -- not a classifier, so\n"
@@ -589,4 +623,13 @@ def print_report(results: list[dict], run_info: dict) -> None:
             "per subject (see CARE-PD-REPORT.md), so a single held-out subject's labels\n"
             "carry ~no variance to correlate against on their own. Positive r means higher\n"
             "distance from the reference class tracks higher severity, as intended."
+        )
+    if random_results:
+        print()
+        print(
+            "random.* replays the identical probe on a freshly-constructed, untrained\n"
+            "encoder of the same architecture -- a delta near zero means this dataset/label\n"
+            "can't currently distinguish trained representations from random ones (this was\n"
+            "the case for CARE-PD-BMCLab/3DGait, see CARE-PD-REPORT.md); a large positive\n"
+            "delta means training is contributing real, linearly-decodable signal here."
         )
