@@ -7,6 +7,7 @@ import warnings
 import numpy as np
 import torch as t
 import torch.nn as nn
+from scipy.stats import spearmanr
 from sklearn.exceptions import ConvergenceWarning
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, balanced_accuracy_score, f1_score
@@ -242,6 +243,99 @@ def run_linear_probe(
     }
 
 # ================================================================================================================
+# DMU (DEVIATION FROM MEAN UNIMPAIRED)
+# ================================================================================================================
+
+def run_dmu_probe(
+    *,
+    embeddings: np.ndarray,
+    labels: np.ndarray,
+    groups: np.ndarray,
+    walk_ids: np.ndarray,
+    reference_label: str | None = None,
+    fold_indices: list[tuple[np.ndarray, np.ndarray]] | None = None,
+) -> dict:
+    """Deviation-from-mean-unimpaired score (papers/GaitEncoder.pdf Sec 4.2): a
+    per-window diagonal Mahalanobis distance from a reference ("unimpaired")
+    class's mean/variance, computed fresh per LOSO fold from the training
+    split only. Unlike run_linear_probe, this needs no classifier at all --
+    it's a continuous, unsupervised-at-scoring-time distance, tested here for
+    whether it correlates with an ordinal severity label (`labels`, e.g.
+    CARE-PD's "0"/"1"/"2" MDS-UPDRS-gait score) where a hard LOSO classifier
+    might not (see CARE-PD-REPORT.md).
+
+    Two deliberate deviations from the paper: (1) diagonal (per-feature)
+    variance instead of full covariance -- our embed_dim (256) is much wider
+    than their 16-dim latent, and a fold's reference class is too small to
+    estimate a full covariance from; (2) the reference mean/variance is
+    refit per LOSO fold (train split only) instead of one fixed pre-curated
+    cohort, since we don't have a cohort disjoint from the labeled data.
+
+    Correlation is computed once, pooled across all folds' held-out (dmu,
+    label) pairs, not per-fold: CARE-PD-REPORT.md established severity is
+    near-constant per subject, so a single held-out subject's labels carry
+    ~no variance to correlate against.
+    """
+    if fold_indices is None:
+        fold_indices = list(LeaveOneGroupOut().split(embeddings, labels, groups=groups))
+
+    dmu_all, label_all = [], []
+    walk_dmu_all, walk_label_all = [], []
+    n_folds = 0
+
+    for train_idx, test_idx in fold_indices:
+        labels_train = labels[train_idx]
+        ref_label = reference_label if reference_label is not None else min(labels_train)
+        ref_mask = labels_train == ref_label
+        if ref_mask.sum() < 5:
+            continue
+
+        mu = embeddings[train_idx][ref_mask].mean(axis=0)
+        var = embeddings[train_idx][ref_mask].var(axis=0) + 1e-6
+        dmu = np.sqrt(((embeddings[test_idx] - mu) ** 2 / var).sum(axis=1))
+
+        dmu_all.append(dmu)
+        label_all.append(labels[test_idx])
+        n_folds += 1
+
+        test_walks = walk_ids[test_idx]
+        unique_walks, walk_inverse = np.unique(test_walks, return_inverse=True)
+        for i in range(len(unique_walks)):
+            mask = walk_inverse == i
+            walk_dmu_all.append(dmu[mask].mean())
+            walk_label_all.append(labels[test_idx][mask][0])
+
+    if n_folds == 0:
+        raise ValueError("No valid LOSO folds had >=5 reference-class training windows.")
+
+    dmu_all = np.concatenate(dmu_all)
+    label_all = np.concatenate(label_all).astype(int)
+    walk_dmu_all = np.array(walk_dmu_all)
+    walk_label_all = np.array(walk_label_all).astype(int)
+
+    spearman_r, spearman_p = spearmanr(dmu_all, label_all)
+    walk_spearman_r, walk_spearman_p = spearmanr(walk_dmu_all, walk_label_all)
+
+    per_class = {}
+    for cls in sorted(set(label_all.tolist())):
+        mask = label_all == cls
+        per_class[str(cls)] = {
+            "mean": float(dmu_all[mask].mean()),
+            "std": float(dmu_all[mask].std()),
+            "n": int(mask.sum()),
+        }
+
+    return {
+        "n_folds": n_folds,
+        "reference_label": str(reference_label) if reference_label is not None else "auto (min per fold)",
+        "spearman_r": float(spearman_r),
+        "spearman_p": float(spearman_p),
+        "walk_spearman_r": float(walk_spearman_r),
+        "walk_spearman_p": float(walk_spearman_p),
+        "per_class": per_class,
+    }
+
+# ================================================================================================================
 # ATTENTIVE PROBE
 # ================================================================================================================
 
@@ -461,4 +555,38 @@ def print_report(results: list[dict], run_info: dict) -> None:
             "pooling rule) before a linear classifier, fresh per LOSO fold -- tests whether\n"
             "mean-pooling specifically was discarding signal the encoder has. A delta near\n"
             "zero means pooling wasn't the bottleneck; a large positive delta means it was."
+        )
+
+    dmu_results = [r for r in results if "dmu" in r]
+    if dmu_results:
+        print()
+        print("DMU (deviation from mean unimpaired, papers/GaitEncoder.pdf) vs. ordinal severity label")
+        print("=" * 78)
+        header = f"{'dataset':<12} {'ref':>10} {'folds':>6} {'spearman r (p)':>20} {'walk r (p)':>20}"
+        print(header)
+        print("-" * len(header))
+        for r in dmu_results:
+            d = r["dmu"]
+            ref = d["reference_label"] if d["reference_label"] != "auto (min per fold)" else "auto"
+            print(
+                f"{r['dataset']:<12} {ref:>10} {d['n_folds']:>6} "
+                f"{d['spearman_r']:>7.3f} ({d['spearman_p']:.3f}) "
+                f"{d['walk_spearman_r']:>10.3f} ({d['walk_spearman_p']:.3f})"
+            )
+        print("-" * len(header))
+        for r in dmu_results:
+            classes = ", ".join(
+                f"{cls}: {c['mean']:.2f}+-{c['std']:.2f} (n={c['n']})"
+                for cls, c in r["dmu"]["per_class"].items()
+            )
+            print(f"{r['dataset']:<12} per-class dmu mean+-std: {classes}")
+        print("=" * 78)
+        print(
+            "dmu is a per-window diagonal-Mahalanobis distance from the reference class's\n"
+            "mean/variance (refit per LOSO fold, train split only) -- not a classifier, so\n"
+            "there's no accuracy/chance baseline. spearman_r is pooled across all folds'\n"
+            "held-out (dmu, label) pairs, not computed per-fold: severity is near-constant\n"
+            "per subject (see CARE-PD-REPORT.md), so a single held-out subject's labels\n"
+            "carry ~no variance to correlate against on their own. Positive r means higher\n"
+            "distance from the reference class tracks higher severity, as intended."
         )

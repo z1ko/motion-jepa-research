@@ -36,7 +36,7 @@ from motion_jepa.evaluation.data import (
     load_window_table,
 )
 from motion_jepa.evaluation.encoder import compute_embeddings, compute_token_embeddings, load_encoder, read_checkpoint_provenance
-from motion_jepa.evaluation.probes import print_report, run_attentive_probe, run_linear_probe
+from motion_jepa.evaluation.probes import print_report, run_attentive_probe, run_dmu_probe, run_linear_probe
 
 DEFAULT_DATASETS = ["SOMA", "HumanEva", "DanceDB"]
 
@@ -95,6 +95,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--attentive-lr", default=1e-3, type=float)
     parser.add_argument("--attentive-weight-decay", default=1e-2, type=float)
     parser.add_argument("--attentive-heads", default=4, type=int)
+    parser.add_argument(
+        "--dmu-probe",
+        action="store_true",
+        help=(
+            "Also compute a deviation-from-mean-unimpaired score (papers/GaitEncoder.pdf): a "
+            "per-window diagonal-Mahalanobis distance from a reference class's mean/variance "
+            "(refit per LOSO fold), correlated against the ordinal severity label -- only "
+            "meaningful for CARE-PD-* datasets (needs --care-pd-labels)."
+        ),
+    )
+    parser.add_argument(
+        "--dmu-reference-label", default=None, type=str,
+        help="Reference ('unimpaired') class for the DMU score. Default: min label per fold.",
+    )
     parser.add_argument("--out", default=None, type=Path, help="Optional path to write full results as JSON.")
     parser.add_argument(
         "--care-pd-labels", default=Path("data/raw/care_pd/carepd_mds_updrs_gait_severity.csv"), type=Path,
@@ -157,6 +171,8 @@ def evaluate_dataset(
     attentive_lr: float = 1e-3,
     attentive_weight_decay: float = 1e-2,
     attentive_heads: int = 4,
+    dmu_probe: bool = False,
+    dmu_reference_label: str | None = None,
     care_pd_labels: dict[str, int] | None = None,
     care_pd_fold_file: Path | None = None,
     babel_raw_root: Path | None = None,
@@ -274,6 +290,12 @@ def evaluate_dataset(
             fold_indices=fold_indices,
         )
 
+    if dmu_probe and care_pd_labels is not None:
+        result["dmu"] = run_dmu_probe(
+            embeddings=embeddings, labels=labels, groups=groups, walk_ids=walk_ids,
+            reference_label=dmu_reference_label, fold_indices=fold_indices,
+        )
+
     return result
 
 # ================================================================================================================
@@ -316,6 +338,8 @@ def main() -> None:
             attentive_lr=args.attentive_lr,
             attentive_weight_decay=args.attentive_weight_decay,
             attentive_heads=args.attentive_heads,
+            dmu_probe=args.dmu_probe,
+            dmu_reference_label=args.dmu_reference_label,
             care_pd_labels=care_pd_labels,
             care_pd_fold_file=args.care_pd_fold_file,
             babel_raw_root=args.babel_raw_root,
