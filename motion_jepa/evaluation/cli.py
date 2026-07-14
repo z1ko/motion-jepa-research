@@ -283,6 +283,7 @@ def evaluate_dataset(
     )
     segment_count = config.data.window_size // config.architecture.segment_size
     group_count = len(config.training.groups)
+    channels = config.architecture.channels
     labels = rows["eval_label"].to_numpy()
     groups = rows["subject"].to_numpy()
     walk_ids = rows["suid"].to_numpy()
@@ -296,6 +297,7 @@ def evaluate_dataset(
         device=device,
         segment_count=segment_count,
         group_count=group_count,
+        channels=channels,
         pooling="mean",
     )
 
@@ -340,6 +342,7 @@ def evaluate_dataset(
                 device=device,
                 segment_count=segment_count,
                 group_count=group_count,
+                channels=channels,
                 pooling=alt_pooling,
             )
             result["pooling_comparison"][alt_pooling] = run_linear_probe(
@@ -358,7 +361,7 @@ def evaluate_dataset(
     if attentive_probe:
         tokens, valid_mask = compute_token_embeddings(
             encoder=encoder, dataset=window_dataset, batch_size=batch_size, device=device,
-            segment_count=segment_count, group_count=group_count,
+            segment_count=segment_count, group_count=group_count, channels=channels,
         )
         result["attentive"] = run_attentive_probe(
             tokens=tokens,
@@ -388,6 +391,7 @@ def evaluate_dataset(
             device=device,
             segment_count=segment_count,
             group_count=group_count,
+            channels=channels,
             pooling="mean",
         )
         result["random_baseline"] = run_linear_probe(

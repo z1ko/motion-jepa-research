@@ -73,6 +73,7 @@ def compute_token_embeddings(
     device: t.device,
     segment_count: int,
     group_count: int,
+    channels: int,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Per-window token embeddings, unpooled: (N, segment_count*group_count, D) plus
     a (N, segment_count*group_count) valid-token mask. Feeds the attentive probe
@@ -87,7 +88,11 @@ def compute_token_embeddings(
     token_chunks: list[np.ndarray] = []
     mask_chunks: list[np.ndarray] = []
     for batch in loader:
-        x = batch["x"].to(device, non_blocking=True)
+        # Same trailing-channel slice as MotionJEPA.forward (model.py) -- calling
+        # the bare encoder directly here bypasses that slice, so a checkpoint
+        # trained with architecture.channels < 4 (e.g. dropping tau) would
+        # otherwise get the raw 4-channel window and crash in its input projection.
+        x = batch["x"].to(device, non_blocking=True)[..., :channels]
         valid_segments = batch["valid_segments"].to(device, non_blocking=True)
 
         segment_valid = t.arange(segment_count, device=device).unsqueeze(0) < valid_segments.unsqueeze(1)
@@ -111,6 +116,7 @@ def compute_embeddings(
     device: t.device,
     segment_count: int,
     group_count: int,
+    channels: int,
     pooling: str = "mean",
 ) -> np.ndarray:
     """Run the encoder over every window and pool its tokens into one embedding.
@@ -168,7 +174,8 @@ def compute_embeddings(
 
     chunks: list[np.ndarray] = []
     for batch in loader:
-        x = batch["x"].to(device, non_blocking=True)
+        # Same trailing-channel slice as MotionJEPA.forward -- see compute_token_embeddings.
+        x = batch["x"].to(device, non_blocking=True)[..., :channels]
         valid_segments = batch["valid_segments"].to(device, non_blocking=True)
 
         segment_valid = t.arange(segment_count, device=device).unsqueeze(0) < valid_segments.unsqueeze(1)

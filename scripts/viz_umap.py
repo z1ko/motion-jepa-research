@@ -211,6 +211,7 @@ def main() -> None:
         device=device,
         segment_count=config.data.window_size // config.architecture.segment_size,
         group_count=len(config.training.groups),
+        channels=config.architecture.channels,
     )
     coords = run_umap(
         embeddings=embeddings,
